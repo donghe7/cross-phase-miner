@@ -1,0 +1,14 @@
+name: crossphase-mqtt
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CP_MQTT_PORT:-1883}:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-t", "health", "-m", "ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15

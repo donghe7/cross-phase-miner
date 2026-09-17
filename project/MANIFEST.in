@@ -1,0 +1,11 @@
+include Makefile run.sh requirements.txt package.json package-lock.json .prettierrc.json
+recursive-include server *.sh *.yaml *.conf requirements.txt README_cn.md
+recursive-include server/static *.html *.css *.js
+recursive-include docs *.md
+recursive-include tests *.py
+recursive-include scripts *.py
+prune experiments
+prune server/backups
+prune node_modules
+prune test-results
+global-exclude *.py[cod] *.sqlite3* *.dump .env .env.*

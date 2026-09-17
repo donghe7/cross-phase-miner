@@ -1,0 +1,68 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.12']
+    defaults:
+      run:
+        working-directory: project
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: project/package-lock.json
+      - run: python -m pip install -e '.[server,experiment,dev,browser]'
+      - run: npm ci
+      - run: make check
+      - run: python -m scripts.verify_archive
+      - run: python -m playwright install --with-deps chromium
+      - run: make test-browser
+      - run: make build
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-results-${{ matrix.python }}
+          path: project/test-results/
+
+  integrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: crossphase_test
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: crossphase_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd 'pg_isready -U crossphase_test -d crossphase_test'
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      CP_TEST_POSTGRES_URL: postgresql://crossphase_test:ci-only-password@127.0.0.1:5432/crossphase_test
+    defaults:
+      run:
+        working-directory: project
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[server,experiment]'
+      - run: docker compose -f server/compose.mqtt.yaml up -d --wait --wait-timeout 60
+      - run: make test-postgres test-mqtt
+      - if: always()
+        run: docker compose -f server/compose.mqtt.yaml down

@@ -1,0 +1,3 @@
+# Run from project/: python -m pip install -r server/requirements.txt
+# Versions are maintained in pyproject.toml.
+.[server]

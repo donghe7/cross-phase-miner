@@ -1,0 +1,23 @@
+name: crossphase-postgres
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CP_PG_USER:-crossphase}
+      POSTGRES_DB: ${CP_PG_DATABASE:-crossphase}
+      POSTGRES_PASSWORD: ${CP_PG_PASSWORD:?Run ./server/postgres.sh up to initialize credentials}
+    ports:
+      - "127.0.0.1:${CP_PG_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 uses a versioned PGDATA underneath this directory.
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    stop_grace_period: 30s
+volumes:
+  postgres_data:

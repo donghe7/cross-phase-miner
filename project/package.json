@@ -1,0 +1,11 @@
+{
+  "name": "crossphase-console-tools",
+  "private": true,
+  "scripts": {
+    "check": "prettier --check server/static",
+    "format": "prettier --write server/static"
+  },
+  "devDependencies": {
+    "prettier": "3.6.2"
+  }
+}
