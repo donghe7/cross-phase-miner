@@ -114,7 +114,7 @@ TRAVEL_SECONDS_RANGE = (
 
 # Wall-clock seconds are multiplied by this factor to get simulated
 # seconds, so a 150s signal cycle completes in 150/SPEED real seconds.
-CLOCK_SPEED: float = _env_float("CP_SPEED", 20.0)
+CLOCK_SPEED: float = _env_float("CP_SPEED", 5.0)
 
 # Simulated start of the demo day: KST 06:00.
 START_HOUR_KST: float = _env_float("CP_START_HOUR", 6.0)

@@ -9,7 +9,7 @@ INTERSECTIONS=1200
 ZONE=48
 HUBS=8
 ROBOTS=20
-SPEED=20
+SPEED=5
 DB="${DATABASE_URL:-${CP_DB:-server_state.sqlite3}}"
 FRESH=()
 POSTGRES=false
@@ -41,7 +41,7 @@ Usage: ./server/run_demo.sh [options]
   --zone N           Delivery-zone crossings (default 48)
   --hubs N           Shared hub crossings (default 8)
   --robots N         Robot count (default 20)
-  --speed N          Initial speed: 1, 2, 5, 10, 20 (default 20)
+  --speed N          Initial speed: 1, 2, 5, 10, 20 (default 5)
 Ctrl-C stops the server and fleet. PostgreSQL and MQTT containers keep running.
 HELP
       exit 0 ;;
