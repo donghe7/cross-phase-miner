@@ -25,6 +25,7 @@ jobs:
       - run: make check
       - run: python -m scripts.verify_archive
       - run: python -m playwright install --with-deps chromium
+      - run: make test-delivery
       - run: make test-browser
       - run: make build
       - uses: actions/upload-artifact@v4

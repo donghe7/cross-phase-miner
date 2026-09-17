@@ -44,6 +44,17 @@ def read_snapshot(source: Path) -> dict:
             if "visits" in tables
             else []
         )
+        snapshot["learning_jobs"] = (
+            [
+                (row[0], row[1], json.loads(row[2]), *row[3:])
+                for row in connection.execute(
+                    "SELECT record_id, id, payload, status, attempts, "
+                    "next_attempt, created_at, last_error FROM learning_jobs"
+                )
+            ]
+            if "learning_jobs" in tables
+            else []
+        )
         for _, _, payload in snapshot["models"]:
             model_from_dict(payload)
         for _, _, payload in snapshot["learners"]:

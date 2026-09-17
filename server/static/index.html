@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="ko">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CrossPhase · 机器人与信号灯</title>
+    <title>CrossPhase · 로봇과 신호등</title>
     <link rel="stylesheet" href="/static/console.css" />
     <script src="/static/console.js" defer></script>
   </head>
@@ -12,15 +12,15 @@
       <div class="brand">
         <span class="brand-icon">↗</span>
         <div>
-          <h1>CrossPhase <span>车队观测台</span></h1>
-          <p>机器人位置 · 信号观测 · 周期学习</p>
+          <h1>CrossPhase <span>플릿 관측대</span></h1>
+          <p>로봇 위치 · 신호 관측 · 주기 학습</p>
         </div>
       </div>
       <div class="clock">
-        <strong id="clock">--:--:--</strong><span id="clock-meta">仿真时间 / KST</span>
+        <strong id="clock">--:--:--</strong><span id="clock-meta">시뮬레이션 시간 / KST</span>
       </div>
       <div class="speed-control">
-        <span id="speed-label">仿真速度</span>
+        <span id="speed-label">시뮬레이션 속도</span>
         <div id="speed-options" class="speed-options" role="group" aria-labelledby="speed-label">
           <button type="button" data-speed="1" aria-pressed="false" disabled>1×</button>
           <button type="button" data-speed="2" aria-pressed="false" disabled>2×</button>
@@ -28,28 +28,28 @@
           <button type="button" data-speed="10" aria-pressed="false" disabled>10×</button>
           <button type="button" data-speed="20" aria-pressed="false" disabled>20×</button>
         </div>
-        <span id="speed-status" role="status" aria-live="polite">作用于整个仿真</span>
+        <span id="speed-status" role="status" aria-live="polite">전체 시뮬레이션에 적용</span>
       </div>
-      <span class="connection" id="connection" role="status">正在连接</span>
+      <span class="connection" id="connection" role="status">연결 중</span>
     </header>
     <div class="error" id="error" role="alert" hidden></div>
     <main>
-      <section class="overview" aria-label="车队概览">
+      <section class="overview" aria-label="플릿 개요">
         <div>
-          <span>已上报机器人</span><strong id="robot-count">—</strong
-          ><small id="robot-summary">等待车队上报</small>
+          <span>보고된 로봇</span><strong id="robot-count">—</strong
+          ><small id="robot-summary">플릿 보고 대기 중</small>
         </div>
         <div>
-          <span>当前有观测的路口</span><strong id="observed-count">—</strong
-          ><small id="coverage-summary">等待观测</small>
+          <span>현재 관측 중인 교차로</span><strong id="observed-count">—</strong
+          ><small id="coverage-summary">관측 대기 중</small>
         </div>
         <div class="gate">
-          <span>单帧置信度门槛</span><strong id="obs-threshold">—</strong
-          ><small>confidence ≥ threshold，才接收该帧</small>
+          <span>단일 프레임 confidence threshold</span><strong id="obs-threshold">—</strong
+          ><small>confidence ≥ threshold일 때만 해당 프레임 수신</small>
         </div>
         <div class="gate">
-          <span>车队共识门槛</span><strong id="consensus-threshold">—</strong
-          ><small>按置信度加权的一致率，决定实时灯色</small>
+          <span>플릿 합의 threshold</span><strong id="consensus-threshold">—</strong
+          ><small>confidence 가중치가 적용된 일치율로 실시간 신호색 결정</small>
         </div>
       </section>
       <div class="workspace">
@@ -58,23 +58,26 @@
             <div class="section-heading">
               <div>
                 <span class="eyebrow">01 / FLEET</span>
-                <h2>机器人现在在哪儿</h2>
+                <h2>로봇들의 현재 위치</h2>
               </div>
-              <span class="hint">点击机器人，持续跟随它的位置</span>
+              <span class="hint">로봇을 클릭하면 위치를 계속 따라갑니다</span>
             </div>
             <div id="tracking" class="tracking">
-              <span class="empty">暂无机器人上报。启动 fleet 后，会显示当前位置和行驶目的地。</span>
+              <span class="empty"
+                >아직 로봇 보고가 없습니다. fleet을 시작하면 현재 위치와 이동 목적지가
+                표시됩니다.</span
+              >
             </div>
             <div class="fleet-navigation">
-              <strong id="fleet-count">机器人列表</strong
-              ><span class="hint">点击编号直接查看并跟随</span>
+              <strong id="fleet-count">로봇 목록</strong
+              ><span class="hint">번호를 클릭해 바로 확인하고 따라가기</span>
             </div>
-            <div id="robot-picker" class="robot-picker" aria-label="选择机器人"></div>
+            <div id="robot-picker" class="robot-picker" aria-label="로봇 선택"></div>
             <div
               class="table-scroll"
               tabindex="0"
               role="region"
-              aria-label="机器人详情表，窄屏可左右滚动"
+              aria-label="로봇 상세 표, 좁은 화면에서는 좌우 스크롤 가능"
             >
               <table class="fleet-table">
                 <colgroup>
@@ -86,76 +89,82 @@
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>机器人</th>
-                    <th>当前位置 / 行程</th>
-                    <th>状态</th>
-                    <th>最近一帧观测</th>
-                    <th>置信度 / 门槛</th>
+                    <th>로봇</th>
+                    <th>현재 위치 / 경로</th>
+                    <th>상태</th>
+                    <th>최근 관측 프레임</th>
+                    <th>confidence / threshold</th>
                   </tr>
                 </thead>
                 <tbody id="fleet"></tbody>
               </table>
-              <p id="fleet-empty" class="empty">等待机器人上报</p>
+              <p id="fleet-empty" class="empty">로봇 보고 대기 중</p>
             </div>
-            <nav class="fleet-pagination" aria-label="机器人列表翻页">
-              <span id="fleet-page" class="hint">每页 5 台</span
-              ><button id="fleet-prev" type="button" disabled>上一页</button
-              ><button id="fleet-next" type="button" disabled>下一页</button>
+            <nav class="fleet-pagination" aria-label="로봇 목록 페이지 이동">
+              <span id="fleet-page" class="hint">페이지당 5 대</span
+              ><button id="fleet-prev" type="button" disabled>이전 페이지</button
+              ><button id="fleet-next" type="button" disabled>다음 페이지</button>
             </nav>
             <p class="fleet-mobile-note hint">
-              窄屏可左右滑动表格查看全部列；更多机器人请使用翻页按钮。
+              좁은 화면에서는 표를 좌우로 밀어 전체 열을 확인하세요. 로봇이 많으면 페이지 버튼을
+              사용하세요.
             </p>
           </section>
           <section class="panel">
             <div class="section-heading map-heading">
               <div>
                 <span class="eyebrow">02 / CROSSINGS</span>
-                <h2>路口与模型进度</h2>
+                <h2>교차로와 모델 진행 상황</h2>
               </div>
               <label class="search"
-                >查看范围<select id="map-scope">
-                  <option value="zone">配送区路口</option>
-                  <option value="all">全部路口</option>
+                >표시 범위<select id="map-scope">
+                  <option value="zone">배송 구역 교차로</option>
+                  <option value="all">전체 교차로</option>
                 </select></label
               ><label class="search"
-                >查找路口<input
+                >교차로 검색<input
                   id="search"
                   type="search"
-                  placeholder="名称、区域或 ID"
+                  placeholder="이름, 지역 또는 ID"
                   autocomplete="off"
               /></label>
             </div>
             <p class="hint map-note">
-              路口示意图，非 GPS
-              地图。蓝色标记表示机器人最后上报所在路口；「前往」表示目的地，不代表已到达。
+              교차로 개략도이며 GPS 지도가 아닙니다. 파란색 표시는 로봇이 마지막으로 보고한
+              교차로입니다. '이동 중'은 목적지를 뜻하며 도착을 의미하지 않습니다.
             </p>
             <div class="legend">
-              <span><i class="dot red"></i>实时红灯</span
-              ><span><i class="dot green"></i>实时绿灯</span
-              ><span><i class="dot predicted"></i>模型预测</span
-              ><span><i class="dot amber"></i>共识不足</span
-              ><span><i class="dot unknown"></i>暂无有效数据</span>
+              <span><i class="dot red"></i>실시간 빨간불</span
+              ><span><i class="dot green"></i>실시간 초록불</span
+              ><span><i class="dot predicted"></i>모델 예측</span
+              ><span><i class="dot amber"></i>합의 부족</span
+              ><span><i class="dot unknown"></i>유효한 데이터 없음</span>
             </div>
-            <div id="zone-map" class="zone-map" aria-label="配送区路口及机器人位置"></div>
-            <p id="no-results" class="empty" hidden>没有匹配的路口。</p>
+            <div id="zone-map" class="zone-map" aria-label="배송 구역 교차로 및 로봇 위치"></div>
+            <p id="no-results" class="empty" hidden>일치하는 교차로가 없습니다.</p>
             <div class="map-pagination">
               <span id="map-page" class="hint"></span
-              ><button id="map-prev" type="button">上一页</button
-              ><button id="map-next" type="button">下一页</button>
+              ><button id="map-prev" type="button">이전 페이지</button
+              ><button id="map-next" type="button">다음 페이지</button>
             </div>
             <p class="hint">
-              模型置信度与单帧视觉置信度不同。到访统计来自已结束的到访汇总；每次重复到访单独计数，机器人数量去重。首次时间为仿真时间，详情保留实际记录时间。
+              모델 confidence는 단일 프레임 시각 confidence와 다릅니다. 방문 통계는 종료된 방문을
+              집계한 것이며, 반복 방문은 매번 개별 집계되고 로봇 수는 중복 제거됩니다. 첫 시각은
+              시뮬레이션 시간이며, 상세에는 실제 기록 시각이 유지됩니다.
             </p>
             <details class="all-crossings">
-              <summary id="all-summary">全部路口概览</summary>
-              <p class="hint">点击任一色块查看观测和学习结果。搜索同时筛选此概览。</p>
-              <div id="field" class="field" aria-label="全部路口"></div>
+              <summary id="all-summary">전체 교차로 개요</summary>
+              <p class="hint">
+                색상 블록을 클릭해 관측과 학습 결과를 확인하세요. 검색은 이 개요에도 함께
+                적용됩니다.
+              </p>
+              <div id="field" class="field" aria-label="전체 교차로"></div>
             </details>
           </section>
           <section class="panel metrics">
             <div>
               <span class="eyebrow">INGEST / LEARNING</span>
-              <h2>观测与学习</h2>
+              <h2>관측과 학습</h2>
             </div>
             <dl id="ledger"></dl>
           </section>
@@ -164,18 +173,21 @@
           <div class="section-heading">
             <div>
               <span class="eyebrow">03 / INSPECT</span>
-              <h2>路口观测详情</h2>
+              <h2>교차로 관측 상세</h2>
             </div>
             <span id="detail-status" class="hint"></span>
           </div>
           <div id="detail">
-            <p class="empty">点击路口卡片，查看灯色、观测置信度、共识结果和周期。</p>
+            <p class="empty">
+              교차로 카드를 클릭해 신호색, 관측 confidence, 합의 결과와 주기를 확인하세요.
+            </p>
           </div>
         </aside>
       </div>
     </main>
     <footer>
-      CrossPhase / 仿真观测控制台 <span>位置来自机器人上报 · threshold 来自服务器实际配置</span>
+      CrossPhase / 시뮬레이션 관측 콘솔
+      <span>위치는 로봇 보고에서 가져옴 · threshold는 서버 실제 설정에서 가져옴</span>
     </footer>
   </body>
 </html>

@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
 from typing import Dict, Iterable, Optional, Tuple
 
+from crossphase_miner.core.evidence import TransitionEvidence
 from crossphase_miner.core.learners import BayesianPeriodLearner
 from crossphase_miner.core.models import PeriodModel
 
@@ -44,6 +46,8 @@ def learner_to_dict(learner: BayesianPeriodLearner) -> dict:
         "red_samples": list(learner._red_samples),
         "shared_T_red": learner._shared_T_red,
         "sample_count": learner.sample_count,
+        "evidence_version": 2,
+        "evidence": learner.evidence.to_dict(),
     }
 
 
@@ -58,7 +62,15 @@ def learner_from_dict(data: dict) -> BayesianPeriodLearner:
     learner._rg_times = deque(data["rg_times"], maxlen=50)
     learner._red_samples = deque(data["red_samples"], maxlen=50)
     learner._shared_T_red = data["shared_T_red"]
-    learner.sample_count = data["sample_count"]
+    if "evidence" in data:
+        learner.evidence = TransitionEvidence.from_dict(data["evidence"])
+        learner.sample_count = data["sample_count"]
+    else:
+        # Old counts cannot prove independent events. Retain parameter estimates,
+        # but accumulate new evidence before re-enabling reliable predictions.
+        learner.sample_count = 0
+        learner._rg_times.clear()
+        learner._red_samples.clear()
     return learner
 
 
@@ -71,10 +83,16 @@ def model_to_dict(model: PeriodModel) -> dict:
         "confidence": model.confidence,
         "sample_count": model.sample_count,
         "last_updated": model.last_updated,
+        "evidence_version": model.evidence_version,
+        "complete_cycles": model.complete_cycles,
+        "timing_mae": model.timing_mae,
+        "timing_evaluations": model.timing_evaluations,
     }
 
 
 def model_from_dict(data: dict) -> PeriodModel:
+    if "evidence_version" not in data:
+        data = {**data, "sample_count": 0, "confidence": 0.0, "evidence_version": 1}
     return PeriodModel(**data)
 
 
@@ -95,6 +113,7 @@ class StateStore:
 
     def __init__(self, path: str) -> None:
         self.path = path
+        self._closed = False
         self.backend = "postgresql" if is_postgres(path) else "sqlite"
         self._lock = threading.Lock()
         if self.backend == "postgresql":
@@ -126,6 +145,12 @@ class StateStore:
     @contextmanager
     def _transaction(self):
         with self._lock:
+            if self._closed:
+                raise RuntimeError("State store closed")
+            if self.backend == "postgresql" and self._conn.closed:
+                import psycopg
+
+                self._conn = psycopg.connect(self.path, autocommit=True, connect_timeout=10)
             transaction = self._conn.transaction() if self.backend == "postgresql" else self._conn
             with transaction:
                 cursor = self._conn.cursor()
@@ -166,10 +191,25 @@ class StateStore:
                 "CREATE INDEX IF NOT EXISTS visits_crossing_time ON visits (id, recorded_at)"
             )
 
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS learning_jobs (
+                    record_id TEXT PRIMARY KEY, id TEXT NOT NULL,
+                    payload {payload_type} NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    created_at DOUBLE PRECISION NOT NULL, last_error TEXT
+                )
+            """)
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS learning_jobs_pending "
+                "ON learning_jobs (status, created_at)"
+            )
+
     def clear(self) -> None:
         """Explicit reset of CrossPhase tables only; never drop the database."""
         with self._transaction() as cursor:
             for table in (
+                "learning_jobs",
                 "visits",
                 "model_history",
                 "models",
@@ -232,15 +272,43 @@ class StateStore:
             row = cursor.fetchone()
             return learner_from_dict(self._decode(row[0])) if row else None
 
-    def save_learning_state(self, entries: Iterable[tuple], history: Optional[dict] = None) -> None:
+    def save_learning_state(
+        self,
+        entries: Iterable[tuple],
+        history: Optional[dict] = None,
+        job_id: Optional[str] = None,
+        independent_yield: Optional[dict] = None,
+    ) -> bool:
         """Commit all affected periods' models, learners and exact reds together."""
         with self._transaction() as cursor:
+            if job_id is not None:
+                cursor.execute(
+                    self._sql(
+                        "UPDATE learning_jobs SET status='done', last_error=NULL "
+                        "WHERE record_id=? AND status='pending'"
+                    ),
+                    (job_id,),
+                )
+                if cursor.rowcount != 1:
+                    return False
+            if job_id is not None and independent_yield is not None:
+                cursor.execute(self._sql("SELECT payload FROM visits WHERE record_id=?"), (job_id,))
+                row = cursor.fetchone()
+                if row:
+                    record = self._decode(row[0])
+                    record["independent_transitions_by_period"] = independent_yield
+                    cursor.execute(
+                        self._sql("UPDATE visits SET payload=? WHERE record_id=?"),
+                        (self._json(record), job_id),
+                    )
             for key, model, learner, exact_red in entries:
                 self._save_payload(cursor, "models", key, model_to_dict(model))
                 self._save_payload(cursor, "learners", key, learner_to_dict(learner))
                 self._save_payload(cursor, "red_measurements", key, list(exact_red))
                 if history and key in history:
                     self._save_payload(cursor, "model_history", key, history[key])
+
+        return True
 
     def load_model_history(self) -> dict:
         with self._transaction() as cursor:
@@ -249,7 +317,7 @@ class StateStore:
                 (iid, period): self._decode(payload) for iid, period, payload in cursor.fetchall()
             }
 
-    def save_visit(self, record: dict) -> bool:
+    def save_visit(self, record: dict, job: Optional[dict] = None) -> bool:
         with self._transaction() as cursor:
             cursor.execute(
                 self._sql(
@@ -266,7 +334,72 @@ class StateStore:
                     self._json(record),
                 ),
             )
-            return cursor.rowcount == 1
+            inserted = cursor.rowcount == 1
+            if not inserted:
+                cursor.execute(
+                    self._sql("SELECT robot_id, id FROM visits WHERE record_id=?"),
+                    (record["record_id"],),
+                )
+                if tuple(cursor.fetchone()) != (record["robot_id"], record["intersection_id"]):
+                    raise ValueError("record_id belongs to another robot or crossing")
+            if inserted and job is not None:
+                cursor.execute(
+                    self._sql(
+                        "INSERT INTO learning_jobs "
+                        "(record_id, id, payload, created_at) VALUES (?, ?, ?, ?)"
+                    ),
+                    (
+                        record["record_id"],
+                        record["intersection_id"],
+                        self._json(job),
+                        record["recorded_at"],
+                    ),
+                )
+            return inserted
+
+    def pending_jobs(self) -> dict:
+        with self._transaction() as cursor:
+            cursor.execute(
+                "SELECT id, COUNT(*) FROM learning_jobs WHERE status='pending' GROUP BY id"
+            )
+            return dict(cursor.fetchall())
+
+    def next_learning_job(self) -> Optional[dict]:
+        # Retry blocks only this crossing, so later reports cannot overtake its failed update.
+        with self._transaction() as cursor:
+            cursor.execute(
+                self._sql("""
+                SELECT j.record_id, j.id, j.payload FROM learning_jobs j
+                WHERE j.status='pending' AND j.next_attempt<=? AND NOT EXISTS (
+                    SELECT 1 FROM learning_jobs older WHERE older.id=j.id AND older.status='pending'
+                    AND (older.created_at<j.created_at OR
+                         (older.created_at=j.created_at AND older.record_id<j.record_id)))
+                ORDER BY j.created_at, j.record_id LIMIT 1
+            """),
+                (time.time(),),
+            )
+            row = cursor.fetchone()
+            return (
+                dict(record_id=row[0], intersection_id=row[1], **self._decode(row[2]))
+                if row
+                else None
+            )
+
+    def retry_learning_job(self, record_id: str, error: str) -> None:
+        with self._transaction() as cursor:
+            cursor.execute(
+                self._sql("SELECT attempts FROM learning_jobs WHERE record_id=?"), (record_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                delay = min(30.0, 0.25 * 2 ** min(row[0], 7))
+                cursor.execute(
+                    self._sql(
+                        "UPDATE learning_jobs SET attempts=attempts+1, "
+                        "next_attempt=?, last_error=? WHERE record_id=? AND status='pending'"
+                    ),
+                    (time.time() + delay, error[:200], record_id),
+                )
 
     def load_visit_totals(self) -> dict:
         totals = {}
@@ -335,10 +468,11 @@ class StateStore:
                 "red_measurements",
                 "model_history",
                 "visits",
+                "learning_jobs",
             )
             if self.backend == "postgresql":
                 cursor.execute(
-                    "LOCK TABLE intersections, models, learners, red_measurements, model_history, visits IN EXCLUSIVE MODE"
+                    "LOCK TABLE intersections, models, learners, red_measurements, model_history, visits, learning_jobs IN EXCLUSIVE MODE"
                 )
             else:
                 cursor.execute("BEGIN IMMEDIATE")
@@ -353,7 +487,7 @@ class StateStore:
                 ),
                 snapshot["intersections"],
             )
-            for table in tables[1:-1]:
+            for table in ("models", "learners", "red_measurements", "model_history"):
                 for iid, period, payload in snapshot.get(table, []):
                     self._save_payload(cursor, table, (iid, period), payload)
             for record in snapshot.get("visits", []):
@@ -373,8 +507,19 @@ class StateStore:
                     ),
                 )
 
+            for job in snapshot.get("learning_jobs", []):
+                cursor.execute(
+                    self._sql(
+                        "INSERT INTO learning_jobs "
+                        "(record_id, id, payload, status, attempts, next_attempt, created_at, last_error) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    ),
+                    (job[0], job[1], self._json(job[2]), *job[3:]),
+                )
+
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._conn.close()
 
 
@@ -429,6 +574,11 @@ class LearnerCache:
     def keys_for(self, intersection_id: str) -> list:
         """In-memory keys belonging to one crossing."""
         return [k for k in self._items if k[0] == intersection_id]
+
+    def discard(self, intersection_id: str) -> None:
+        """Invalidate committed crossing state without writing stale cache entries."""
+        for key in self.keys_for(intersection_id):
+            self._items.pop(key)
 
     def _evict_if_needed(self) -> None:
         while len(self._items) > self.capacity:

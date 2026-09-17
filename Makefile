@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: install check test test-postgres test-browser test-mqtt format build demo benchmark
+.PHONY: install check test test-postgres test-browser test-mqtt test-delivery format build demo benchmark
 
 install:
 	$(PYTHON) -m pip install -e '.[server,experiment,dev]'
@@ -8,7 +8,7 @@ install:
 check:
 	$(PYTHON) -m ruff check .
 	$(PYTHON) -m ruff format --check .
-	bash -n run.sh server/run_demo.sh server/postgres.sh
+	bash -n run.sh experiments/run.sh server/postgres.sh
 	node --check server/static/console.js
 	npm run check
 	$(PYTHON) -m unittest discover -s tests -t .
@@ -22,6 +22,9 @@ test-postgres:
 test-browser:
 	$(PYTHON) -m tests.e2e.check_console
 
+test-delivery:
+	$(PYTHON) -m tests.e2e.check_delivery
+
 test-mqtt:
 	$(PYTHON) -m tests.e2e.check_mqtt
 
@@ -34,7 +37,7 @@ build:
 	$(PYTHON) -m build
 
 demo:
-	./server/run_demo.sh --postgres --mqtt
+	./run.sh --postgres --mqtt
 
 benchmark:
 	$(PYTHON) -m scripts.bench_scale

@@ -103,6 +103,28 @@ UPLOAD_BATCH_SECONDS: float = _env_float("CP_BATCH_SECONDS", 1.0)
 
 MISCLASS_PROB: float = _env_float("CP_MISCLASS", 0.03)
 
+
+# --- ingest limits ----------------------------------------------------------
+#
+# The server trusts the fleet (no auth yet - see docs/architecture.md), but
+# a single misbehaving or buggy client still should not be able to grow
+# server memory or stall the event loop without bound.  These caps are sized
+# generously above any real fleet traffic:
+#
+# * a real robot at 15 FPS falling behind for the entire scout timeout
+#   (``SCOUT_TIMEOUT_SECONDS`` in server/fleet.py, 450s) would still only
+#   catch up ~6750 frames in one batch;
+# * a real arrival reports 2-4 phase transitions, never dozens.
+
+# Longest a robot_id / intersection_id / destination_id string may be.
+MAX_ID_LENGTH: int = _env_int("CP_MAX_ID_LENGTH", 128)
+
+# Largest number of vision frames accepted in one observation batch.
+MAX_OBSERVATIONS_PER_BATCH: int = _env_int("CP_MAX_OBS_BATCH", 10_000)
+
+# Largest number of phase transitions accepted in one arrival report.
+MAX_TRANSITIONS_PER_ARRIVAL: int = _env_int("CP_MAX_TRANSITIONS", 128)
+
 # Simulated travel time between two crossings.
 TRAVEL_SECONDS_RANGE = (
     _env_float("CP_TRAVEL_MIN", 90.0),

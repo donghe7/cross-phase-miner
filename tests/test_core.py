@@ -331,6 +331,86 @@ class TestEndToEnd(unittest.TestCase):
         self.assertAlmostEqual(night_model.T_red, 60, delta=12)
         self.assertAlmostEqual(night_model.T_cycle, 100, delta=10)
 
+    def test_shared_green_is_isolated_per_intersection(self):
+        """Two intersections learned in the same pipeline run must not leak
+        state into each other via shared-green pooling.
+
+        ``OnlinePipeline`` indexes its Bayesian learners by intersection so
+        that per-intersection bookkeeping (shared-green pooling, re-storing
+        all periods' models) only ever walks that one intersection's
+        learners. If that indexing were ever broken and fell back to
+        scanning every learner in the city by matching on ``iid`` after
+        iterating everything, a bug there could leak intersection B's data
+        into intersection A's shared-green vote (or vice versa).
+
+        We check this by comparing a combined run (both intersections
+        interleaved through one pipeline) against two solo runs (each
+        intersection through its own pipeline): true isolation means the
+        combined run's per-intersection models must exactly match the solo
+        runs', regardless of how well the estimator itself converges.
+        """
+        cfg_a = {
+            "day": {"T_cycle": 120, "T_red": 80, "T_green": 40, "phase_offset": 0},
+            "night": {"T_cycle": 120, "T_red": 80, "T_green": 40, "phase_offset": 0},
+        }
+        cfg_b = {
+            "day": {"T_cycle": 150, "T_red": 80, "T_green": 70, "phase_offset": 0},
+            "night": {"T_cycle": 150, "T_red": 80, "T_green": 70, "phase_offset": 0},
+        }
+
+        def make_observations(iid, cfg, seed, id_offset):
+            # arrival_id must be globally unique: group_observations_by_arrival
+            # groups purely by that id, regardless of intersection, so two
+            # intersections sharing ids would merge into one arrival group.
+            world = SignalWorld(period_configs=SIMPLE_TOD_PERIODS)
+            world.add_intersection(iid, cfg)
+            sim = RobotArrivalSimulator(world, random_seed=seed)
+            observations = []
+            for i in range(8):
+                obs = sim.simulate_arrival(
+                    iid,
+                    BASE + 8 * 3600 + i * 1800 + (i * 331) % 600,
+                    f"{iid}_r{i}",
+                    misclass_prob=0.0,
+                )
+                for o in obs:
+                    o.arrival_id = id_offset + i
+                observations.extend(obs)
+            return world, observations
+
+        world_a, obs_a = make_observations("iid_a", cfg_a, seed=11, id_offset=0)
+        world_b, obs_b = make_observations("iid_b", cfg_b, seed=13, id_offset=1000)
+
+        # Solo runs: each intersection learned entirely on its own.
+        solo_a = OnlinePipeline(period_configs=SIMPLE_TOD_PERIODS, world=world_a).run(obs_a)
+        solo_b = OnlinePipeline(period_configs=SIMPLE_TOD_PERIODS, world=world_b).run(obs_b)
+        solo_model_a = solo_a.tod_manager.get_model("iid_a", BASE + 8 * 3600)
+        solo_model_b = solo_b.tod_manager.get_model("iid_b", BASE + 8 * 3600)
+        self.assertIsNotNone(solo_model_a)
+        self.assertIsNotNone(solo_model_b)
+
+        # Combined run: both intersections interleaved through one pipeline.
+        combined_world = SignalWorld(period_configs=SIMPLE_TOD_PERIODS)
+        combined_world.add_intersection("iid_a", cfg_a)
+        combined_world.add_intersection("iid_b", cfg_b)
+        combined_obs = sorted(obs_a + obs_b, key=lambda o: o.timestamp)
+        combined = OnlinePipeline(period_configs=SIMPLE_TOD_PERIODS, world=combined_world).run(
+            combined_obs
+        )
+        combined_model_a = combined.tod_manager.get_model("iid_a", BASE + 8 * 3600)
+        combined_model_b = combined.tod_manager.get_model("iid_b", BASE + 8 * 3600)
+
+        # Compare every field except ``last_updated`` (a wall-clock stamp
+        # that legitimately differs between the two runs).
+        fields = ("T_cycle", "T_red", "T_green", "phi_offset", "confidence", "sample_count")
+        for name in fields:
+            self.assertEqual(
+                getattr(combined_model_a, name), getattr(solo_model_a, name), msg=f"iid_a.{name}"
+            )
+            self.assertEqual(
+                getattr(combined_model_b, name), getattr(solo_model_b, name), msg=f"iid_b.{name}"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

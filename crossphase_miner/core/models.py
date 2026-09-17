@@ -87,6 +87,9 @@ class PhaseTransition:
     to_color: SignalColor
     robot_id: str = "robot_001"
     episode_start: Optional[float] = None
+    exact_red: bool = False
+    observed_since: Optional[float] = None
+    episode_id: str = ""
 
 
 @dataclass
@@ -105,6 +108,11 @@ class PeriodModel:
     confidence: float = 0.0
     sample_count: int = 0
     last_updated: float = field(default_factory=time.time)
+
+    evidence_version: int = 2
+    complete_cycles: int = 0
+    timing_mae: Optional[float] = None
+    timing_evaluations: int = 0
 
     MIN_CONFIDENCE: ClassVar[float] = 0.3
     # Sparse-transition models can be confidently WRONG (a spurious exact

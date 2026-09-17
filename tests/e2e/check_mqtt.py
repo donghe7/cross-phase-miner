@@ -14,6 +14,7 @@ from psycopg import sql
 from server import config
 from server.fleet import Clock
 from server.mqtt_transport import FleetMQTT, ServerMQTT, client
+from server.outbox import ArrivalOutbox
 from server.postgres_env import DEFAULT_FILE, database_url
 from server.service import SignalService
 from server.store import StateStore
@@ -39,6 +40,8 @@ async def check(target):
     )
     bridge = ServerMQTT(service)
     publisher = None
+    outbox = None
+    outbox_folder = tempfile.TemporaryDirectory(prefix="cp-outbox-e2e-")
     observer = client("mqtt-check")
     messages = queue.Queue()
     observer.on_connect = lambda c, u, f, r, p: c.subscribe(
@@ -90,9 +93,21 @@ async def check(target):
             waited=900,
             transitions=transitions,
         )
-        publisher.post("/v1/arrivals", report)
-        publisher.post("/v1/arrivals", report)
+        outbox = ArrivalOutbox(
+            str(Path(outbox_folder.name) / "outbox.sqlite3"),
+            config.MQTT_PREFIX,
+            publisher,
+            autostart=False,
+        )
+        outbox.enqueue(report)
+        # Lose the first application ack, then retransmit the same durable report.
+        outbox.deliver_once()
         await wait_for(lambda: service.detail(iid)["learning"]["samples"] == 6)
+        await asyncio.sleep(0.6)
+        assert outbox.pending_count() == 1
+        publisher.arrival_ack_handler = outbox.acknowledge
+        outbox.deliver_once()
+        await wait_for(lambda: outbox.pending_count() == 0)
         assert service.detail(iid)["learning"]["visits"]["visits"] == 1
         assert service.detail(iid)["learning"]["status"] == "reliable"
         observer.publish(
@@ -128,6 +143,9 @@ async def check(target):
     finally:
         if publisher:
             publisher.close()
+        if outbox:
+            outbox.close()
+        outbox_folder.cleanup()
         observer.disconnect()
         observer.loop_stop()
         await bridge.close()

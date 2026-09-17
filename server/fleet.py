@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import threading
 import time
@@ -36,6 +37,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -45,6 +47,7 @@ from crossphase_miner.core.transitions import extract_transitions
 from crossphase_miner.simulation.world import SignalWorld
 from server import config
 from server.city import build_city
+from server.outbox import ArrivalOutbox, DurableArrivalClient
 
 SCOUT_TIMEOUT_SECONDS = 450.0
 
@@ -85,6 +88,7 @@ class Clock:
     speed: float
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _confirmed_time: Optional[float] = field(default=None, repr=False)
+    stopped: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def now(self) -> float:
         with self._lock:
@@ -111,6 +115,8 @@ class Clock:
         # Short sleeps let an in-flight journey or observation batch react
         # to a speed change, instead of waiting out the old wall-time delay.
         while True:
+            if self.stopped.is_set():
+                raise InterruptedError("Fleet stopping")
             with self._lock:
                 remaining = sim_target - (
                     self.sim_start + (time.time() - self.wall_start) * self.speed
@@ -375,43 +381,18 @@ class Robot:
         arrival time if the robot arrived during red.  The difference to
         the RED->GREEN edge is what the learner uses to estimate T_red.
         """
-        arrived_on_red = bool(observations) and observations[0].color == SignalColor.RED
-        last_gr: Optional[float] = None
-        payload: List[dict] = []
-
-        for transition in transitions:
-            episode_start = None
-            if (
-                transition.from_color == SignalColor.RED
-                and transition.to_color == SignalColor.GREEN
-            ):
-                if last_gr is not None:
-                    episode_start = last_gr
-                elif arrived_on_red:
-                    episode_start = arrival_time
-            elif (
-                transition.from_color == SignalColor.GREEN
-                and transition.to_color == SignalColor.RED
-            ):
-                last_gr = transition.timestamp
-
-            payload.append(
-                {
-                    "timestamp": transition.timestamp,
-                    "from_color": transition.from_color.name,
-                    "to_color": transition.to_color.name,
-                    "episode_start": episode_start,
-                    # An episode that started at an observed GREEN->RED edge
-                    # is an exact T_red measurement, not a random-arrival
-                    # lower bound.  The server treats the two differently.
-                    "exact_red": bool(
-                        transition.to_color == SignalColor.GREEN
-                        and episode_start is not None
-                        and last_gr is not None
-                    ),
-                }
-            )
-        return payload
+        return [
+            {
+                "timestamp": t.timestamp,
+                "from_color": t.from_color.name,
+                "to_color": t.to_color.name,
+                "episode_start": t.episode_start,
+                "exact_red": t.exact_red,
+                "observed_since": t.observed_since,
+                "episode_id": t.episode_id,
+            }
+            for t in transitions
+        ]
 
 
 # --- fleet ----------------------------------------------------------------
@@ -472,6 +453,22 @@ def run_fleet(
 
         transport = FleetMQTT(clock)
 
+    delivery_client = MQTTRobotClient(base_url, transport) if transport else ServerClient(base_url)
+    scope = base_url.rstrip("/") + (
+        f"|mqtt:{config.MQTT_HOST}:{config.MQTT_PORT}/{config.MQTT_PREFIX}"
+        if transport
+        else "|http"
+    )
+    outbox = ArrivalOutbox(
+        os.environ.get(
+            "CP_OUTBOX_PATH", str(Path(__file__).resolve().parent / "data/fleet-outbox.sqlite3")
+        ),
+        scope,
+        delivery_client,
+    )
+    if transport:
+        transport.arrival_ack_handler = outbox.acknowledge
+
     def sync_clock() -> None:
         sync_client = ServerClient(base_url)
         while not stop.wait(clock.sync_interval()):
@@ -486,7 +483,10 @@ def run_fleet(
     def robot_loop(robot_id: str, route: List[str], seed: int) -> None:
         robot = Robot(
             robot_id=robot_id,
-            client=MQTTRobotClient(base_url, transport) if transport else ServerClient(base_url),
+            client=DurableArrivalClient(
+                MQTTRobotClient(base_url, transport) if transport else ServerClient(base_url),
+                outbox,
+            ),
             clock=clock,
             world=world,
             route=route,
@@ -503,6 +503,8 @@ def run_fleet(
             try:
                 robot.run_arrival()
             except Exception as error:  # keep the fleet alive
+                if stop.is_set():
+                    break
                 print(f"[{robot_id}] {type(error).__name__}: {error}")
                 time.sleep(1.0)
 
@@ -532,6 +534,10 @@ def run_fleet(
         pass
     finally:
         stop.set()
+        clock.stopped.set()
+        for thread in threads:
+            thread.join()
+        outbox.close()
         if transport:
             transport.close()
 

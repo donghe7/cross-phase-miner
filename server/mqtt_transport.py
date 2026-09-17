@@ -98,9 +98,12 @@ class ServerMQTT:
         payload = envelope["payload"]
         if payload.get("robot_id") != robot_id:
             raise ValueError("robot ID does not match topic")
-        key = (envelope["session"], robot_id)
+        session = envelope["session"]
+        if not isinstance(session, str) or not session or any(c in session for c in "/+#"):
+            raise ValueError("invalid reply session")
+        key = (session, robot_id)
         seq = int(envelope["seq"])
-        if seq <= self.sequences.get(key, -1):
+        if kind != "arrivals" and seq <= self.sequences.get(key, -1):
             return
         if kind == "observations":
             batch = ObservationBatch.model_validate(payload)
@@ -118,10 +121,17 @@ class ServerMQTT:
             self.service.report_travel(**report.model_dump())
         elif kind == "arrivals":
             report = ArrivalReport.model_validate(payload)
-            self.service.submit_arrival(**report.model_dump())
+            ack = self.service.submit_arrival(**report.model_dump())
+            # Even an old sequence may be a retransmission after a lost application ack.
+            self.client.publish(
+                self.prefix + "/acks/" + session + "/" + robot_id,
+                json.dumps(ack),
+                qos=1,
+                retain=False,
+            )
         else:
             raise ValueError("unknown message kind")
-        self.sequences[key] = seq
+        self.sequences[key] = max(seq, self.sequences.get(key, -1))
         self.received += 1
 
     async def run(self):
@@ -139,9 +149,11 @@ class ServerMQTT:
                 try:
                     started = time.monotonic()
                     self.dispatch(topic, payload)
-                except (ValueError, TypeError, KeyError, AttributeError) as error:
+                except Exception as error:
                     self.errors += 1
-                    LOG.warning("Rejected MQTT telemetry: %s", type(error).__name__)
+                    LOG.warning(
+                        "MQTT dispatch failed (%s); no arrival ack sent", type(error).__name__
+                    )
                 finally:
                     self.max_dispatch_ms = max(
                         self.max_dispatch_ms, (time.monotonic() - started) * 1000
@@ -186,6 +198,7 @@ class FleetMQTT:
         self.client = client("crossphase-fleet")
         self.connected = threading.Event()
         self.session = uuid.uuid4().hex
+        self.arrival_ack_handler = None
         self.lock = threading.Lock()
         self.seq = 0
         self.client.on_connect = self.on_connect
@@ -199,15 +212,30 @@ class FleetMQTT:
 
     def on_connect(self, connection, userdata, flags, reason_code, properties):
         if not reason_code.is_failure:
-            connection.subscribe(config.MQTT_PREFIX + "/clock")
+            connection.subscribe(
+                [
+                    (config.MQTT_PREFIX + "/clock", 0),
+                    (config.MQTT_PREFIX + "/acks/" + self.session + "/+", 1),
+                ]
+            )
             self.connected.set()
 
     def on_message(self, connection, userdata, message):
         if not message.retain:
             try:
-                self.clock.synchronize(json.loads(message.payload))
-            except (ValueError, KeyError, TypeError):
-                LOG.warning("Invalid MQTT clock message")
+                payload = json.loads(message.payload)
+                if message.topic == config.MQTT_PREFIX + "/clock":
+                    self.clock.synchronize(payload)
+                elif (
+                    message.topic.startswith(config.MQTT_PREFIX + "/acks/" + self.session + "/")
+                    and message.topic.rsplit("/", 1)[-1] == payload.get("robot_id")
+                    and self.arrival_ack_handler
+                ):
+                    self.arrival_ack_handler(payload)
+            except Exception:
+                # A local journal error must not kill the MQTT network loop. The
+                # report stays pending and its application ack will be requested again.
+                LOG.exception("MQTT clock/ack handling failed; unconfirmed reports retained")
 
     def post(self, path, payload):
         if not self.connected.is_set():

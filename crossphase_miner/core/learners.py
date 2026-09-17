@@ -19,7 +19,8 @@ shortly after green appears).  From RG transition times alone, only
 additionally use the waiting time of each episode: for a robot that arrived
 at ``episode_start`` during red and saw green at ``tau``, the remaining red
 ``tau - episode_start`` is a sample of a uniform(0, T_red) variable, so
-``2 * mean(remaining)`` is an unbiased estimate of T_red.
+remaining waits are lower-bound evidence. Complete, continuously observed
+cycles and exact red durations are handled separately and take precedence.
 
 Priors are generic and honest: they must NOT be seeded from ground-truth
 signal configurations.
@@ -43,6 +44,7 @@ from typing import Deque, Optional, Tuple
 
 import numpy as np
 
+from crossphase_miner.core.evidence import TransitionEvidence
 from crossphase_miner.core.models import PeriodModel, PhaseTransition, SignalColor
 from crossphase_miner.utils.math_utils import (
     gaussian_product,
@@ -96,24 +98,36 @@ class BayesianPeriodLearner:
         # used as this period's vote for the shared T_green.
         self._shared_T_red: Optional[float] = None
         self.sample_count: int = 0
+        self.evidence = TransitionEvidence()
 
     def update(self, transition: PhaseTransition) -> PeriodModel:
         """Update the posterior with a new transition; return the model."""
-        self.sample_count += 1
-
-        if _is_rg(transition):
-            self._rg_times.append(transition.timestamp)
-            r = _remaining_red(transition)
-            if r is not None:
-                self._red_samples.append(r)
-
-        if len(self._rg_times) >= 2:
-            self._estimate_T_cycle()
-        if self._red_samples:
-            self._estimate_T_red()
+        self.evidence.add(transition, self.get_model())
+        self.sample_count = self.evidence.count
+        self._rg_times = deque(self.evidence.rg_times(), maxlen=50)
+        self._red_samples = deque(self.evidence.red_durations(exact=False), maxlen=50)
+        self._shared_T_red = None
+        cycles = self.evidence.cycles()
+        if cycles:
+            # A median resists isolated bad measurements. MAD expresses observed
+            # disagreement; this is an estimator uncertainty, not a calibrated probability.
+            durations = np.array([c[0] for c in cycles])
+            self.mu_T_cycle = float(np.median(durations))
+            mad = float(np.median(np.abs(durations - self.mu_T_cycle)))
+            self.sigma_T_cycle = max(0.1, 1.4826 * mad, 1.0 / np.sqrt(len(cycles)))
+            self.mu_T_red = float(np.median([c[1] for c in cycles]))
+            self.sigma_T_red = max(0.1, 1.0 / np.sqrt(len(cycles)))
+        else:
+            if len(self._rg_times) >= 2:
+                self._estimate_T_cycle()
+            exact_red = self.evidence.red_durations(exact=True)
+            if exact_red:
+                self.mu_T_red = float(np.clip(np.median(exact_red), 5, self.mu_T_cycle - 5))
+                self.sigma_T_red = max(0.1, 1.0 / np.sqrt(len(exact_red)))
+            elif self._red_samples:
+                self._estimate_T_red()
         if self._rg_times:
             self._update_phi_offset()
-
         return self.get_model()
 
     def _estimate_T_cycle(self) -> None:
@@ -201,11 +215,9 @@ class BayesianPeriodLearner:
 
         # Recompute the posterior from scratch (prior + full-data estimate)
         # so early ambiguous updates are overridden as data accumulates.
-        # The likelihood tightens with the number of inlier pairs (their
-        # mean has error ~1/sqrt(n)); with many pairs the data fully
-        # dominates the prior - sub-second T_cycle accuracy is needed to
-        # keep phase drift small over hundreds of cycles.
-        obs_sigma = max(2.0, 40.0 / n_inliers)
+        # Pairwise differences are correlated. Bound precision by independent
+        # event intervals, not by the quadratic number of pairs.
+        obs_sigma = max(2.0, 40.0 / max(1, len(rg) - 1))
         self.mu_T_cycle, self.sigma_T_cycle = gaussian_product(
             self.prior_T_cycle[0], self.prior_T_cycle[1], refined_T, obs_sigma
         )
@@ -291,19 +303,16 @@ class BayesianPeriodLearner:
             confidence=confidence,
             sample_count=self.sample_count,
             last_updated=time.time(),
+            complete_cycles=len(self.evidence.cycles()),
+            timing_mae=(
+                float(np.mean(self.evidence.timing_errors)) if self.evidence.timing_errors else None
+            ),
+            timing_evaluations=len(self.evidence.timing_errors),
         )
 
     def reset(self) -> None:
         """Reset all state to the generic prior."""
-        self.mu_T_cycle = 120.0
-        self.sigma_T_cycle = 40.0
-        self.mu_T_red = 60.0
-        self.sigma_T_red = 30.0
-        self.phi_offset = 0.0
-        self._rg_times.clear()
-        self._red_samples.clear()
-        self._shared_T_red = None
-        self.sample_count = 0
+        self.__init__(self.prior_T_cycle)
 
 
 class UKFPeriodLearner:

@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
-import queue
 import statistics
 import threading
 import time
@@ -50,7 +50,9 @@ from server.live_state import (
     LIVE_UNKNOWN,
     LiveSignalState,
 )
-from server.store import LearnerCache, StateStore
+from server.store import LearnerCache, StateStore, learner_from_dict, learner_to_dict
+
+LOG = logging.getLogger(__name__)
 
 # Compact state codes used in the snapshot payload.
 STATE_CODES = {
@@ -149,6 +151,7 @@ class IngestStats:
     transitions: int = 0
     learn_updates: int = 0
     learn_seconds: float = 0.0
+    learn_errors: int = 0
     disputes: int = 0
     recent_obs: List[Tuple[float, int]] = field(default_factory=list)
 
@@ -198,7 +201,7 @@ class SignalService:
         self.model_history = self.store.load_model_history()
         self.visit_totals = self.store.load_visit_totals()
         self.visit_yields = self.store.load_recent_visit_yields()
-        self.pending_learning = defaultdict(int)
+        self.pending_learning = defaultdict(int, self.store.pending_jobs())
 
         self.live: Dict[str, LiveSignalState] = {}
         self.robots: Dict[str, RobotStatus] = {}
@@ -216,9 +219,7 @@ class SignalService:
         )
 
         self._lock = threading.RLock()
-        self._learn_queue: "queue.Queue[Tuple[str, List[PhaseTransition], List[Tuple[str, float]]]]" = queue.Queue(
-            maxsize=10000
-        )
+        self._learn_ready = threading.Event()
         self._stop = threading.Event()
         self._worker = threading.Thread(target=self._learn_worker, name="learner", daemon=True)
         self._worker.start()
@@ -228,12 +229,18 @@ class SignalService:
     def shutdown(self) -> None:
         """Stop the learning worker and persist everything."""
         self._stop.set()
-        self._worker.join(timeout=5.0)
-        with self._lock:
-            self.learners.flush()
-            for key, model in self.models.items():
-                self.store.save_model(key, model)
+        self._learn_ready.set()
+        # Finish the current atomic update; remaining durable jobs resume next start.
+        self._worker.join()
         self.store.close()
+
+    def wait_for_learning(self, timeout: float = 10.0) -> None:
+        """Bounded wait for durable pending work (primarily for tests and diagnostics)."""
+        deadline = time.monotonic() + timeout
+        while self.store.pending_jobs():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Learning jobs are still pending")
+            time.sleep(0.01)
 
     # -- ingest ------------------------------------------------------------
 
@@ -363,6 +370,9 @@ class SignalService:
                 from_color=SignalColor[t["from_color"]],
                 to_color=SignalColor[t["to_color"]],
                 robot_id=robot_id,
+                exact_red=bool(t.get("exact_red", False)),
+                observed_since=t.get("observed_since"),
+                episode_id=t.get("episode_id", ""),
                 episode_start=(
                     float(t["episode_start"]) if t.get("episode_start") is not None else None
                 ),
@@ -389,90 +399,158 @@ class SignalService:
             "recorded_at": time.time(),
             "transitions_by_period": dict(by_period),
         }
-        if not self.store.save_visit(record):
-            return {"queued": 0, "queue_depth": self._learn_queue.qsize(), "duplicate": True}
-        self.visit_yields.setdefault(intersection_id, deque(maxlen=20)).append(record)
-        total = self.visit_totals.setdefault(
-            intersection_id,
-            {"robot_ids": set(), "visits": 0, "scout": 0, "normal": 0, "cross": 0, "timeout": 0},
+        if not parsed:
+            record["independent_transitions_by_period"] = {}
+        job = (
+            {"robot_id": robot_id, "transitions": transitions, "exacts": exacts} if parsed else None
         )
-        total["robot_ids"].add(robot_id)
-        total["visits"] += 1
-        if mode in ("scout", "normal"):
-            total[mode] += 1
-        if action in ("CROSS", "TIMEOUT"):
-            total[action.lower()] += 1
+        with self._lock:
+            inserted = self.store.save_visit(record, job)
+            if inserted and parsed:
+                self.pending_learning[intersection_id] += 1
+            ack = {
+                "stored": True,
+                "record_id": record["record_id"],
+                "robot_id": robot_id,
+                "queued": len(parsed) if inserted else 0,
+                "queue_depth": sum(self.pending_learning.values()),
+                "duplicate": not inserted,
+            }
+            self._learn_ready.set()
+            if not inserted:
+                return ack
+            self.visit_yields.setdefault(intersection_id, deque(maxlen=20)).append(record)
+            total = self.visit_totals.setdefault(
+                intersection_id,
+                {
+                    "robot_ids": set(),
+                    "visits": 0,
+                    "scout": 0,
+                    "normal": 0,
+                    "cross": 0,
+                    "timeout": 0,
+                },
+            )
+            total["robot_ids"].add(robot_id)
+            total["visits"] += 1
+            if mode in ("scout", "normal"):
+                total[mode] += 1
+            if action in ("CROSS", "TIMEOUT"):
+                total[action.lower()] += 1
 
-        robot = self.robots.setdefault(robot_id, RobotStatus(robot_id))
-        robot.arrivals += 1
-        robot.crossings += int(action == "CROSS")
-        robot.waited = waited
-        robot.action = action
-        robot.mode = mode
-        robot.intersection_id = intersection_id
-        robot.updated_at = depart_time
-        if mode == "scout":
-            robot.scout_arrivals += 1
-        if predicted_wait is not None:
-            # Seconds of vision confirmation the model let the robot skip.
-            robot.saved_seconds += max(0.0, config.CONFIRM_SECONDS - 3.0)
+            robot = self.robots.setdefault(robot_id, RobotStatus(robot_id))
+            robot.arrivals += 1
+            robot.crossings += int(action == "CROSS")
+            robot.waited = waited
+            if depart_time >= robot.updated_at:
+                robot.action = action
+                robot.mode = mode
+                robot.intersection_id = intersection_id
+                robot.updated_at = depart_time
+            if mode == "scout":
+                robot.scout_arrivals += 1
+            if predicted_wait is not None:
+                # Seconds of vision confirmation the model let the robot skip.
+                robot.saved_seconds += max(0.0, config.CONFIRM_SECONDS - 3.0)
 
-        self.stats.arrivals += 1
-        self.stats.transitions += len(parsed)
+            self.stats.arrivals += 1
+            self.stats.transitions += len(parsed)
 
-        if parsed:
-            self.pending_learning[intersection_id] += 1
-            try:
-                self._learn_queue.put_nowait((intersection_id, parsed, exacts))
-            except queue.Full:
-                self.pending_learning[intersection_id] -= 1
-                return {
-                    "queued": 0,
-                    "queue_depth": self._learn_queue.qsize(),
-                    "dropped": len(parsed),
-                }
-
-        return {"queued": len(parsed), "queue_depth": self._learn_queue.qsize()}
+            return ack
 
     # -- learning ----------------------------------------------------------
 
     def _learn_worker(self) -> None:
+        refresh_required = False
         while not self._stop.is_set():
-            try:
-                intersection_id, transitions, exacts = self._learn_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
+            job = None
             started = time.perf_counter()
             try:
-                self._learn(intersection_id, transitions, exacts)
+                if refresh_required:
+                    # A commit can succeed while its response is lost. Keep retrying this
+                    # refresh after a DB outage, even if the committed job is no longer pending.
+                    with self._lock:
+                        self.models = self.store.load_models()
+                        self.model_history = self.store.load_model_history()
+                        self.visit_yields = self.store.load_recent_visit_yields()
+                        self._exact_red = defaultdict(
+                            lambda: deque(maxlen=20),
+                            {
+                                k: deque(v, maxlen=20)
+                                for k, v in self.store.load_exact_red().items()
+                            },
+                        )
+                        self.learners = LearnerCache(self.store, config.LEARNER_CACHE_SIZE)
+                        self.pending_learning = defaultdict(int, self.store.pending_jobs())
+                    refresh_required = False
+                job = self.store.next_learning_job()
+                if job is None:
+                    self._learn_ready.wait(0.2)
+                    self._learn_ready.clear()
+                    continue
+                iid = job["intersection_id"]
+                transitions = [
+                    PhaseTransition(
+                        intersection_id=iid,
+                        robot_id=job["robot_id"],
+                        exact_red=bool(t.get("exact_red", False)),
+                        observed_since=t.get("observed_since"),
+                        episode_id=t.get("episode_id", ""),
+                        timestamp=float(t["timestamp"]),
+                        from_color=SignalColor[t["from_color"]],
+                        to_color=SignalColor[t["to_color"]],
+                        episode_start=t.get("episode_start"),
+                    )
+                    for t in job["transitions"]
+                ]
+                self._learn(iid, transitions, job["exacts"], job_id=job["record_id"])
+                with self._lock:
+                    self.pending_learning = defaultdict(int, self.store.pending_jobs())
+            except Exception as error:
+                refresh_required = True
+                self.stats.learn_errors += 1
+                LOG.exception("Learning failed; durable job retained for retry")
+                if job is not None:
+                    try:
+                        self.store.retry_learning_job(job["record_id"], type(error).__name__)
+                    except Exception:
+                        LOG.exception("Cannot access learning journal; retrying later")
+                self._stop.wait(0.25)
             finally:
-                self.pending_learning[intersection_id] = max(
-                    0, self.pending_learning[intersection_id] - 1
-                )
-                self.stats.learn_seconds += time.perf_counter() - started
-                self._learn_queue.task_done()
+                if job:
+                    self.stats.learn_seconds += time.perf_counter() - started
 
     def _learn(
         self,
         intersection_id: str,
         transitions: List[PhaseTransition],
         exacts: Optional[List[Tuple[str, float]]] = None,
+        job_id: Optional[str] = None,
     ) -> None:
         with self._lock:
+            keys = {k for k in self.models if k[0] == intersection_id}
+            keys.update(
+                (intersection_id, classify_tod(t.timestamp, self.period_configs))
+                for t in transitions
+            )
+            keys.update(self.learners.keys_for(intersection_id))
+            # Never mutate cached learners before the transaction commits. LRU eviction,
+            # failures and retries must not persist a partially applied arrival.
+            working = {k: learner_from_dict(learner_to_dict(self.learners.get(k))) for k in keys}
+            counts_before = {k: learner.sample_count for k, learner in working.items()}
+            reds = {k: deque(self._exact_red.get(k, ()), maxlen=20) for k in keys}
             for period, red in exacts or []:
-                self._exact_red[(intersection_id, period)].append(red)
+                reds.setdefault((intersection_id, period), deque(maxlen=20)).append(red)
 
             for transition in transitions:
                 period = classify_tod(transition.timestamp, self.period_configs)
                 key = (intersection_id, period)
-                learner = self.learners.get(key)
-                learner.update(transition)
-                self.stats.learn_updates += 1
+                working[key].update(transition)
 
             # Shared-green constraint: pool this crossing's per-period green
             # estimates and push the result back into each period learner,
             # so a data-poor period inherits a precise red duration.
-            self._apply_shared_green(intersection_id)
+            self._apply_shared_green(intersection_id, working, reds)
 
             checkpoint = []
             histories = {}
@@ -481,8 +559,7 @@ class SignalService:
                 "wall_time": time.time(),
                 "robots": sorted({t.robot_id for t in transitions if t.robot_id}),
             }
-            for key in self.learners.keys_for(intersection_id):
-                learner = self.learners.peek(key)
+            for key, learner in working.items():
                 if learner is None or learner.sample_count == 0:
                     continue
                 model = learner.get_model()
@@ -499,13 +576,27 @@ class SignalService:
                     history.setdefault("first_reliable", event)
                 history["last_update"] = event
                 histories[key] = history
-                checkpoint.append((key, model, learner, self._exact_red.get(key, ())))
-            self.store.save_learning_state(checkpoint, histories)
+                checkpoint.append((key, model, learner, reds.get(key, ())))
+            independent_yield = {
+                k[1]: max(0, learner.sample_count - counts_before[k])
+                for k, learner in working.items()
+            }
+            if not self.store.save_learning_state(
+                checkpoint, histories, job_id=job_id, independent_yield=independent_yield
+            ):
+                return
+            self.stats.learn_updates += sum(independent_yield.values())
+            for record in self.visit_yields.get(intersection_id, ()):
+                if job_id and record["record_id"] == job_id:
+                    record["independent_transitions_by_period"] = independent_yield
+            # Cache contains pre-commit objects; drop this crossing without writing them back.
+            self.learners.discard(intersection_id)
+            self._exact_red.update(reds)
             for key, model, _, _ in checkpoint:
                 self.models[key] = model
                 self.model_history[key] = histories[key]
 
-    def _apply_shared_green(self, intersection_id: str) -> None:
+    def _apply_shared_green(self, intersection_id: str, working=None, reds=None) -> None:
         """
         Pool the crossing's periods into one green duration and push it back.
 
@@ -518,12 +609,18 @@ class SignalService:
         precise red from the far better estimated cycle.
         """
         votes: List[Tuple[BayesianPeriodLearner, float, float]] = []
-        for key in self.learners.keys_for(intersection_id):
-            learner = self.learners.peek(key)
+        if working is None:
+            working = {k: self.learners.peek(k) for k in self.learners.keys_for(intersection_id)}
+        if reds is None:
+            reds = self._exact_red
+        for key, learner in working.items():
             if learner is None or learner.sample_count == 0:
                 continue
-            exact = self._exact_red.get(key)
-            if exact:
+            exact = reds.get(key)
+            if learner.evidence.count:
+                green, variance = learner.green_estimate()
+                votes.append((learner, green, max(variance, 0.01)))
+            elif exact:
                 red = statistics.median(exact)
                 votes.append((learner, learner.mu_T_cycle - red, 1.0))
             else:
@@ -653,6 +750,12 @@ class SignalService:
             "period": period,
             "confidence": round(model.confidence, 3) if model else None,
             "samples": model.sample_count if model else 0,
+            "sample_basis": "independent_events"
+            if not model or model.evidence_version >= 2
+            else "legacy",
+            "complete_cycles": model.complete_cycles if model else 0,
+            "timing_mae": model.timing_mae if model else None,
+            "timing_evaluations": model.timing_evaluations if model else 0,
             "status": "reliable"
             if model and model.is_reliable()
             else "learning"
@@ -676,11 +779,13 @@ class SignalService:
         confidence = model.confidence if model else 0.0
         remaining = max(0, PeriodModel.MIN_SAMPLES - samples)
         yields = [
-            record["transitions_by_period"].get(period, 0)
+            record["independent_transitions_by_period"].get(period, 0)
             for record in self.visit_yields.get(intersection_id, ())
             if record["mode"] == "scout"
-            and "transitions_by_period" in record
-            and (record["period"] == period or period in record["transitions_by_period"])
+            and "independent_transitions_by_period" in record
+            and (
+                record["period"] == period or period in record["independent_transitions_by_period"]
+            )
         ]
         mean = sum(yields) / len(yields) if yields else None
         estimate = None
@@ -709,7 +814,10 @@ class SignalService:
             "estimate_basis": basis,
             "recent_scout_visits": len(yields),
             "mean_transitions_per_scout": round(mean, 2) if mean is not None else None,
-            "pending_updates": self.pending_learning[intersection_id],
+            # ``.get`` (not ``[]``) so that merely *viewing* an
+            # intersection's progress never inserts a permanent zero entry
+            # into ``pending_learning`` for it.
+            "pending_updates": self.pending_learning.get(intersection_id, 0),
         }
 
     def snapshot(self, limit: Optional[int] = None) -> dict:
@@ -753,12 +861,13 @@ class SignalService:
                 "arrivals": self.stats.arrivals,
                 "transitions": self.stats.transitions,
                 "learn_updates": self.stats.learn_updates,
+                "learn_errors": self.stats.learn_errors,
                 "learn_ms_avg": (
                     round(self.stats.learn_seconds / self.stats.learn_updates * 1000, 2)
                     if self.stats.learn_updates
                     else 0.0
                 ),
-                "queue_depth": self._learn_queue.qsize(),
+                "queue_depth": sum(self.pending_learning.values()),
                 "models": len(self.models),
                 "models_reliable": reliable,
                 "learners_in_memory": len(self.learners),

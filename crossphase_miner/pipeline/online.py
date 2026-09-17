@@ -100,7 +100,13 @@ class OnlinePipeline:
 
         self.tod_manager = TODManager(period_configs)
         self.ukf_tod_manager = TODManager(period_configs)
-        self._bayes_learners: Dict[Tuple[str, str], BayesianPeriodLearner] = {}
+        # Bayesian learners are indexed intersection -> period -> learner
+        # (rather than a flat ``(intersection, period)`` dict) so that
+        # per-intersection operations below (re-storing all periods'
+        # models, pooling the shared-green estimate) only ever walk that
+        # one intersection's handful of periods instead of scanning every
+        # learner in the whole city on every single transition.
+        self._bayes_learners: Dict[str, Dict[str, BayesianPeriodLearner]] = {}
         self._ukf_learners: Dict[Tuple[str, str], UKFPeriodLearner] = {}
         self._arrival_counters: Dict[Tuple[str, str], int] = {}
 
@@ -186,7 +192,8 @@ class OnlinePipeline:
         snapshots: Dict[Tuple[str, str], List[ModelSnapshot]],
     ) -> None:
         key = (iid, period)
-        bayes = self._bayes_learners.setdefault(key, BayesianPeriodLearner())
+        periods = self._bayes_learners.setdefault(iid, {})
+        bayes = periods.setdefault(period, BayesianPeriodLearner())
         ukf = self._ukf_learners.setdefault(key, UKFPeriodLearner())
 
         bayes.update(transition)
@@ -199,9 +206,8 @@ class OnlinePipeline:
         # Re-store models for ALL periods of this intersection: the shared
         # T_red may have changed in periods other than the current one.
         profile = self.tod_manager.create_intersection(iid)
-        for (i, p), learner in self._bayes_learners.items():
-            if i == iid:
-                profile.tod_models[p] = learner.get_model()
+        for p, learner in periods.items():
+            profile.tod_models[p] = learner.get_model()
         bayes_model = bayes.get_model()
 
         self.ukf_tod_manager.update_model(iid, transition.timestamp, ukf_model)
@@ -221,18 +227,16 @@ class OnlinePipeline:
         intersection (inverse-variance weighted), then apply it back to each
         of the intersection's Bayesian learners.
         """
+        periods = self._bayes_learners.get(iid, {})
         votes = [
-            learner.green_estimate()
-            for (i, _), learner in self._bayes_learners.items()
-            if i == iid and learner.sample_count > 0
+            learner.green_estimate() for learner in periods.values() if learner.sample_count > 0
         ]
         if not votes:
             return
         weights = [1.0 / max(var, 1.0) for _, var in votes]
         T_green = sum(g * w for (g, _), w in zip(votes, weights)) / sum(weights)
-        for (i, _), learner in self._bayes_learners.items():
-            if i == iid:
-                learner.apply_shared_green(T_green)
+        for learner in periods.values():
+            learner.apply_shared_green(T_green)
 
     def _predicted_ttg(self, model: Optional[PeriodModel], obs: SignalObservation) -> float:
         """

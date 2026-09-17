@@ -1,6 +1,5 @@
 """Learning milestones, visit accounting, and honest estimates for the console."""
 
-import queue
 import tempfile
 import unittest
 from collections import deque
@@ -85,10 +84,18 @@ class LearningProgressTest(unittest.TestCase):
         other = "night" if self.period == "day" else "day"
         self.service.visit_yields[self.iid] = deque(
             [
-                dict(mode="scout", period=self.period, transitions_by_period={self.period: 4}),
-                dict(mode="scout", period=self.period, transitions_by_period={}),
-                dict(mode="normal", period=self.period, transitions_by_period={self.period: 10}),
-                dict(mode="scout", period=other, transitions_by_period={other: 4}),
+                dict(
+                    mode="scout",
+                    period=self.period,
+                    independent_transitions_by_period={self.period: 4},
+                ),
+                dict(mode="scout", period=self.period, independent_transitions_by_period={}),
+                dict(
+                    mode="normal",
+                    period=self.period,
+                    independent_transitions_by_period={self.period: 10},
+                ),
+                dict(mode="scout", period=other, independent_transitions_by_period={other: 4}),
             ]
         )
         self.service.models[(self.iid, self.period)] = PeriodModel(sample_count=2, confidence=0.8)
@@ -160,16 +167,48 @@ class LearningProgressTest(unittest.TestCase):
         self.assertNotIn("first_reliable", history)
         self.assertIn("last_update", history)
 
-    def test_reports_show_pending_learning_and_queue_rejection_honestly(self):
+    def test_learn_worker_survives_exception_and_keeps_processing(self):
+        """A failure inside one learning update must not kill the worker
+        thread; the queue should keep draining afterwards."""
+        original = self.service._apply_shared_green
+        calls = {"n": 0}
+
+        def flaky(intersection_id, *args):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("boom")
+            return original(intersection_id, *args)
+
         transitions = [dict(timestamp=self.now, from_color="RED", to_color="GREEN")]
-        with patch.object(self.service._learn_queue, "put_nowait"):
-            result = self.visit(record_id="pending", transitions=transitions)
+        with patch.object(self.service, "_apply_shared_green", side_effect=flaky):
+            self.visit(record_id="boom", transitions=transitions)
+            self.service.wait_for_learning()
+
+        self.assertEqual(self.service.stats.learn_errors, 1)
+        self.assertTrue(self.service._worker.is_alive())
+        # pending_learning must still be decremented on failure, not stuck.
+        self.assertEqual(self.summary()["progress"]["pending_updates"], 0)
+
+        # The worker must still be alive and processing after the failure.
+        self.visit(record_id="after", offset=60, transitions=transitions)
+        self.service.wait_for_learning()
+        self.assertEqual(self.service.stats.learn_errors, 1)
+        self.assertEqual(self.summary()["progress"]["pending_updates"], 0)
+        self.assertGreaterEqual(self.summary()["progress"]["sample_progress"], 0)
+
+    def test_reports_remain_pending_when_worker_is_unavailable(self):
+        self.service._stop.set()
+        self.service._learn_ready.set()
+        self.service._worker.join()
+        transitions = [dict(timestamp=self.now, from_color="RED", to_color="GREEN")]
+        result = self.visit(record_id="pending", transitions=transitions)
+        self.assertTrue(result["stored"])
         self.assertEqual(result["queued"], 1)
         self.assertEqual(self.summary()["progress"]["pending_updates"], 1)
-        with patch.object(self.service._learn_queue, "put_nowait", side_effect=queue.Full):
-            result = self.visit(record_id="dropped", transitions=transitions)
-        self.assertEqual((result["queued"], result["dropped"]), (0, 1))
-        self.assertEqual(self.summary()["progress"]["pending_updates"], 1)
+        result = self.visit(record_id="also-pending", transitions=transitions)
+        self.assertEqual(result["queued"], 1)
+        self.assertNotIn("dropped", result)
+        self.assertEqual(self.service.store.pending_jobs()[self.iid], 2)
 
 
 if __name__ == "__main__":

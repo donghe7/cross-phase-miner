@@ -6,12 +6,12 @@
 
 | 命令 | 作用 |
 |------|------|
-| `./server/run_demo.sh --postgres` | 自动启动 PostgreSQL 容器，再启动后端 + 20 台机器人 + 控制台 |
-| `./server/run_demo.sh --postgres --mqtt` | 同时启动本机 MQTT broker，机器人改用 MQTT 上报并订阅时钟 |
-| `./server/run_demo.sh` | 不启用 Docker，默认使用原 SQLite 文件；设置 DATABASE_URL 时连接该数据库 |
-| `./server/run_demo.sh --intersections 5000 --robots 40 --speed 20` | 放大规模 |
-| `./server/run_demo.sh --resume` | 保留数据（现在已是默认行为；旧命令仍兼容） |
-| `./server/run_demo.sh --postgres --fresh` | 显式清空 PostgreSQL 中 CrossPhase 的六张表，重新实验 |
+| `./run.sh --postgres` | 自动启动 PostgreSQL 容器，再启动后端 + 20 台机器人 + 控制台 |
+| `./run.sh --postgres --mqtt` | 同时启动本机 MQTT broker，机器人改用 MQTT 上报并订阅时钟 |
+| `./run.sh` | 不启用 Docker，默认使用原 SQLite 文件；设置 DATABASE_URL 时连接该数据库 |
+| `./run.sh --intersections 5000 --robots 40 --speed 20` | 放大规模 |
+| `./run.sh --resume` | 保留数据（现在已是默认行为；旧命令仍兼容） |
+| `./run.sh --postgres --fresh` | 显式清空 PostgreSQL 中 CrossPhase 的七张表，重新实验 |
 | `make test-mqtt` | 真实 MQTT + SQLite/PostgreSQL 学习与持久化验收 |
 | `python3 -m scripts.bench_scale --intersections 20000` | 规模基准（内存 / 吞吐 / 学习开销 / LRU） |
 
@@ -22,7 +22,7 @@
 
 ```bash
 python3 -m pip install -e '.[server]'
-./server/run_demo.sh --postgres --mqtt
+./run.sh --postgres --mqtt
 ```
 
 Mosquitto 容器仅映射到本机 `127.0.0.1:1883`，本机实验使用匿名连接。
@@ -40,18 +40,20 @@ Ctrl-C 停止后端和车队，broker 保留运行；可用
 | `robots/{robot_id}/observations` | 15 FPS 检测结果合批上传，QoS 0，不 retain |
 | `robots/{robot_id}/travel` | 行程，QoS 1 |
 | `robots/{robot_id}/arrivals` | 到访与跳变，QoS 1；数据库按报告 ID 去重 |
+| `acks/{session}/{robot_id}` | 到访与学习任务落库确认，QoS 1，不 retain；原报告重发会再次确认 |
 | `clock` | 订阅服务器仿真时钟，替代车队频繁 HTTP 轮询 |
 | `crossings/{id}/state` | 订阅有观测历史路口的实时状态与模型；每 0.2 秒发布，带 `sim_now` |
 | `query/{client_id}` | 发布 `{"request_id":"q1","intersection_id":"seongsu_station"}` 查询详情 |
 | `replies/{client_id}` | 先订阅此 topic，再发查询；响应含对应 `request_id` 与 `detail` 或 `error` |
 
 机器人消息使用 `{"session":"客户端会话ID","seq":1,"payload":{...}}` 信封，
-`payload` 与相应 HTTP 接口一致。同一会话内每台机器人序号递增，重复或落后序号不会
-回退实时位置；重发到访仍需使用原 `record_id`。实时消息不 retain，避免重连时回放旧灯色。
+`payload` 与相应 HTTP 接口一致。同一会话内每台机器人序号递增，重复或落后序号的观测／行程不会
+回退实时位置；到访允许旧序号重发，按原 `record_id` 去重并重新确认。旧到访补传不会回退当前位置。实时消息不 retain，避免重连时回放旧灯色。
 `GET /v1/transport` 可查看连接、接收量、错误和队列；控制台显示当前上传协议。
 浏览器仍通过 HTTP／WebSocket 访问后端，模型和历史详情的 HTTP 查询继续可用。
 
-当前为单后端本机实验实现：QoS 1 不等于数据库提交确认，尚无离线到访补传日志。
+当前为单后端本机实验实现。到访报告已增加本地持久化补传日志和应用层落库确认；
+MQTT QoS 1 只确认 broker 接收，不能代替该应用确认。
 观测断流时仍会过期。MQTT 长连接减少连接开销，合批减少消息数；15 FPS 的检测数据量
 不会因换协议自动减少。低延迟配置关闭 Nagle 合并，可能增加小 TCP 包数量。
 
@@ -77,12 +79,12 @@ Compose 使用官方 `postgres:18` 镜像，数据库只绑定 `127.0.0.1:5432`�
 `Ctrl+C` 只停止后端和机器人，数据库继续运行；下次 `--postgres` 会连接已有数据库。
 网页底部“观测与学习”显示当前使用 PostgreSQL 还是 SQLite。
 
-如果 5432 已被占用，首次启动可指定 `CP_PG_PORT=55432 ./server/run_demo.sh --postgres`；
+如果 5432 已被占用，首次启动可指定 `CP_PG_PORT=55432 ./run.sh --postgres`；
 端口会写入配置文件。已有配置也可修改文件中的 `CP_PG_PORT` 后重启容器。
 `CP_POSTGRES_ENV` 可指定另外的配置文件。此文件使用不带引号的 `KEY=value` 格式，
 值只支持字母、数字、`_`、`-`。已有数据卷的用户／密码不会随环境变量变化而自动修改。
 
-连接自己管理的 PostgreSQL 时，在环境中设置 `DATABASE_URL` 后运行 `./server/run_demo.sh`。
+连接自己管理的 PostgreSQL 时，在环境中设置 `DATABASE_URL` 后运行 `./run.sh`。
 连接地址格式为 `postgresql://用户:密码@主机:端口/数据库`，特殊字符需要 URL 编码。
 优先级为命令行 `--db` > `DATABASE_URL` > `CP_DB` > 默认 SQLite 文件；`--postgres`
 显式选择本项目管理的本机容器，不能与 `--db` 同用。连接失败时直接报错，不会回退 SQLite。
@@ -97,11 +99,12 @@ Compose 使用官方 `postgres:18` 镜像，数据库只绑定 `127.0.0.1:5432`�
 export DATABASE_URL="$(python3 -m server.postgres_env url)"
 python3 -m server.migrate_sqlite --source server_state.sqlite3
 unset DATABASE_URL
-./server/run_demo.sh --postgres
+./run.sh --postgres
 ```
 
-迁移以只读方式读取 SQLite（包含 WAL），在一个事务中导入全部六张表；旧版本缺少
-`red_measurements`、`model_history` 或 `visits` 时可导入其余已有表。
+迁移以只读方式读取 SQLite（包含 WAL），在一个事务中导入全部七张表；旧版本缺少
+`red_measurements`、`model_history`、`visits` 或 `learning_jobs` 时可导入其余已有表。
+迁移包含待处理任务的原始跳变、已完成状态与重试状态。
 目标非空则拒绝覆盖，源文件保持不变。
 若目标已有需要保留的实验，请另建空数据库，通过 `DATABASE_URL` 连接后再导入。
 旧程序没有落盘的学习器状态、观测历史无法通过迁移补回。
@@ -268,7 +271,7 @@ PostgreSQL 测试会为每个用例创建并删除独立 schema，不清空现�
 升级后需同时重启 server 与 fleet，再刷新页面。保留已学模型可使用：
 
 ```bash
-./server/run_demo.sh --postgres
+./run.sh --postgres
 ```
 
 快照 `robots[]` 新增 `updated_at`、`origin_id`、`destination_id`、
@@ -283,3 +286,33 @@ PostgreSQL 测试会为每个用例创建并删除独立 schema，不清空现�
 
 ---
 
+
+## 到访补传与学习恢复
+
+正常启动命令不变：`./run.sh --postgres --mqtt`。HTTP 模式同样支持补传。
+升级需同时重启后端和车队；数据库自动增加 `learning_jobs` 表，不清空已有模型与到访。
+旧版本已丢失的跳变无法从只有计数的历史到访中还原，本次保证针对升级后接收的新报告。
+
+默认本地日志：`server/data/fleet-outbox.sqlite3`（由 Git 忽略）。用
+`CP_OUTBOX_PATH=/持久化目录/fleet-outbox.sqlite3` 指定其他位置。运行真实机器人时，每台设备
+都需有自己的持久化本地日志；当前仿真车队共享一个线程安全的日志文件。
+
+未确认报告在重启后立即重试；连续失败按真实时间退避，最长 30 秒。服务器确认形如：
+
+```json
+{"stored": true, "record_id": "原报告ID", "robot_id": "robot_001", "duplicate": false, "queued": 3}
+```
+
+`stored` 表示到访与待学习任务已持久化，`queued` 表示本次新增任务的跳变数；重复报告仍返回
+`stored: true`，但 `duplicate: true`、`queued: 0`。不要把确认当成模型已经可预测。
+控制台已有的待学习计数和 `/v1/stats` 中的 `queue_depth` 现在包含持久化待处理任务。
+
+重启和断网时保留 outbox 文件。日志按服务 URL 及 MQTT broker／topic 前缀隔离；更换这些地址
+不会自动把旧报告发给新目标。HTTP 与 MQTT 的待发记录也分别隔离，切换协议前应确认旧记录已送达。
+
+`--fresh` 只清空服务端七张应用表，不会删除机器人未确认报告。开始全新实验时，请停止旧车队，
+为新实验指定新的 `CP_OUTBOX_PATH`（例如 `server/data/experiment-02.sqlite3`），同时使用独立
+数据库／MQTT 前缀，避免旧实验的未确认报告进入新实验。待学习和待补传数据会占用磁盘，需保留空间。
+
+验证命令：`make test`、`make test-postgres`、`make test-delivery`、`make test-mqtt`。
+其中故障测试使用临时数据库、随机 schema 和独立 topic，不清空已有实验数据。

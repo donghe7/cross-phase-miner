@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from crossphase_miner.core.learners import BayesianPeriodLearner
@@ -32,6 +33,60 @@ class StoreContract:
             transitions=3,
             transitions_by_period={"day": 3},
         )
+
+    def test_visit_and_job_are_atomic_and_checkpoint_completes_job_once(self):
+        store = StateStore(self.target)
+        self.addCleanup(store.close)
+        record = self.visit_record()
+        with self.assertRaises(TypeError):
+            store.save_visit(record, {"bad": object()})
+        self.assertEqual(store.load_visit_totals(), {})
+        job = dict(robot_id=record["robot_id"], transitions=[], exacts=[])
+        self.assertTrue(store.save_visit(record, job))
+        self.assertFalse(store.save_visit(record, job))
+        self.assertEqual(store.pending_jobs(), {"source": 1})
+        self.assertEqual(store.next_learning_job()["record_id"], record["record_id"])
+        key = ("source", "day")
+        entries = [(key, PeriodModel(sample_count=3), BayesianPeriodLearner(), [100])]
+        save = store._save_payload
+
+        def fail_after_model(cursor, table, key, data):
+            save(cursor, table, key, data)
+            raise RuntimeError("interrupted transaction")
+
+        with patch.object(store, "_save_payload", side_effect=fail_after_model):
+            with self.assertRaises(RuntimeError):
+                store.save_learning_state(entries, job_id=record["record_id"])
+        self.assertEqual(store.load_models(), {})
+        self.assertEqual(store.pending_jobs(), {"source": 1})
+        self.assertTrue(store.save_learning_state(entries, job_id=record["record_id"]))
+        self.assertFalse(
+            store.save_learning_state(
+                [(key, PeriodModel(sample_count=999), BayesianPeriodLearner(), [])],
+                job_id=record["record_id"],
+            )
+        )
+        self.assertEqual(store.load_models()[key].sample_count, 3)
+        self.assertEqual(store.pending_jobs(), {})
+        store.clear()
+        self.assertEqual(store.pending_jobs(), {})
+        self.assertTrue(store.save_visit(record, job))
+
+    def test_migration_preserves_pending_learning_jobs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.sqlite3"
+            store = StateStore(str(source))
+            store.upsert_intersections([("source", "Source", "District", 0, 0, 1)])
+            store.save_visit(
+                self.visit_record(), dict(robot_id="robot_0", transitions=[], exacts=[])
+            )
+            store.close()
+            snapshot = read_snapshot(source)
+            target = StateStore(self.target)
+            self.addCleanup(target.close)
+            target.import_snapshot(snapshot)
+            self.assertEqual(target.pending_jobs(), {"source": 1})
+            self.assertEqual(target.next_learning_job()["record_id"], "visit_000")
 
     def test_visit_history_window_deduplication_and_model_metadata(self):
         store = StateStore(self.target)
@@ -228,6 +283,15 @@ class PostgresStoreTest(StoreContract, unittest.TestCase):
         query = dict(parse_qsl(parts.query))
         query["options"] = "-csearch_path=" + self.schema
         self.target = urlunsplit(parts._replace(query=urlencode(query)))
+
+    def test_broken_connection_reconnects_without_losing_pending_job(self):
+        store = StateStore(self.target)
+        self.addCleanup(store.close)
+        store.save_visit(self.visit_record(), dict(robot_id="robot_0", transitions=[], exacts=[]))
+        store._conn.close()  # simulate a socket closed by a restarted database
+        self.assertEqual(store.pending_jobs(), {"source": 1})
+        self.assertTrue(store.save_learning_state([], job_id="visit_000"))
+        self.assertEqual(store.pending_jobs(), {})
 
     def tearDown(self):
         import psycopg

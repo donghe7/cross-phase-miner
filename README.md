@@ -9,16 +9,17 @@
 ```bash
 # 可使用已配置好的 conda 环境，或自行创建 .venv
 python3 -m pip install -e '.[server,experiment]'
-./server/run_demo.sh --postgres --mqtt
+./run.sh --postgres --mqtt
 ```
 
-访问 <http://127.0.0.1:8000>。不使用 Docker 时运行 `./server/run_demo.sh`，使用 SQLite 与 HTTP。
+访问 <http://127.0.0.1:8000>。不使用 Docker 时运行 `./run.sh`，使用 SQLite 与 HTTP。
 
-只需 `server/run_demo.sh` 即可启动后端、车队和网页。`run.sh` 专用于离线实验，不是另一个在线启动步骤。
+只需根目录的 `run.sh` 即可启动后端、车队和网页。离线实验使用 `experiments/run.sh`，不是另一个在线启动步骤。
 默认保留数据；`--fresh` 才会清空应用数据。Ctrl-C 停止后端和车队，PostgreSQL / MQTT 容器继续运行。
 
 ## 当前行为
 
+- 到访可靠上报：本地持久化补传、HTTP／MQTT 落库确认，服务重启后继续处理学习任务。
 - 检测频率：每台机器人 15 FPS（仿真时间），上报合批；支持 MQTT 或 HTTP。
 - 仿真速度：1×、2×、5×、10×、20×。
 - 模型可预测条件：当前时段至少 6 次跳变、置信度 ≥30%，且周期有效。
@@ -26,13 +27,22 @@ python3 -m pip install -e '.[server,experiment]'
 - 实时观测与模型预测左右显示；学习进度、到访记录与剩余侦察次数估算可查看。
 - 机器人列表固定每页 5 台，可通过全部机器人编号直接定位、翻页和跟随。
 
+## 机器人通行规则
+
+机器人到达路口后按模式决定何时通行（`server/fleet.py` 的 `Robot.run_arrival`）：
+
+- **normal 模式**（服务器已有可预测模型）：不等待完整周期；绿灯以置信度 ≥0.70 的帧连续确认 5 秒（`CONFIRM_SECONDS`）即通行。
+- **scout 模式**（无可信模型，驻留测量周期）：驻留到确认第二次 RED→GREEN 跳变（即测满一个完整周期）为止，随后在确认为绿灯的帧直接通行，不再等 5 秒连续确认。
+- 颜色确认需经过去抖：新颜色需持续 ≥2 秒（`TRANSITION_MIN_DURATION`）才记为跳变。
+- 超时未满足条件则放弃通行：scout 450 秒（`SCOUT_TIMEOUT_SECONDS`）、normal 300 秒，按 `TIMEOUT` 上报。
+
 ## 目录
 
 ```text
+├── run.sh                 # 在线启动入口（后端 + 车队 + 网页控制台）
 ├── crossphase_miner/      # 当前算法、离线仿真、评估与绘图
 ├── server/                # 在线 API、车队、持久化、MQTT、静态网页
 │   ├── static/
-│   ├── run_demo.sh        # 在线启动入口
 │   └── compose.*.yaml     # 本机 PostgreSQL / Mosquitto
 ├── tests/                 # 单元、存储契约及可选端到端检查
 │   ├── server/
@@ -40,11 +50,11 @@ python3 -m pip install -e '.[server,experiment]'
 ├── scripts/               # 隔离数据库测试、规模基准
 ├── docs/                  # 当前运行、开发、架构文档
 ├── experiments/
+│   ├── run.sh             # 离线实验入口
 │   ├── archive/           # 历史源码、报告、五组实验结果及 SHA-256 清单
 │   └── runs/              # 新离线实验输出（忽略提交）
 ├── pyproject.toml         # Python 包、依赖分组、代码质量配置
-├── Makefile               # 常用开发命令
-└── run.sh                 # 离线实验入口
+└── Makefile               # 常用开发命令
 ```
 
 现有 `server_state.sqlite3`、`server/.env.postgres`、`server/backups/` 保留原路径并忽略提交。

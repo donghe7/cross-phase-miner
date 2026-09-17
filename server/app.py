@@ -58,11 +58,11 @@ class ClockSpeedIn(BaseModel):
 
 
 class ObservationBatch(BaseModel):
-    robot_id: str
-    intersection_id: str
+    robot_id: str = Field(min_length=1, max_length=config.MAX_ID_LENGTH)
+    intersection_id: str = Field(min_length=1, max_length=config.MAX_ID_LENGTH)
     mode: str = "normal"
     action: str = "WAIT"
-    observations: List[ObservationIn]
+    observations: List[ObservationIn] = Field(max_length=config.MAX_OBSERVATIONS_PER_BATCH)
 
 
 class TransitionIn(BaseModel):
@@ -73,24 +73,28 @@ class TransitionIn(BaseModel):
     # True when ``episode_start`` is an observed GREEN->RED edge, i.e. the
     # robot measured a whole red phase instead of only part of one.
     exact_red: bool = False
+    observed_since: Optional[float] = None
+    episode_id: str = Field(default="", max_length=256)
 
 
 class TravelReport(BaseModel):
-    robot_id: str
-    destination_id: str
+    robot_id: str = Field(min_length=1, max_length=config.MAX_ID_LENGTH)
+    destination_id: str = Field(min_length=1, max_length=config.MAX_ID_LENGTH)
     started_at: float
     arrives_at: float
 
 
 class ArrivalReport(BaseModel):
-    robot_id: str
-    intersection_id: str
+    robot_id: str = Field(min_length=1, max_length=config.MAX_ID_LENGTH)
+    intersection_id: str = Field(min_length=1, max_length=config.MAX_ID_LENGTH)
     arrival_time: float
     depart_time: float
     mode: str = "normal"
     waited: float = 0.0
     predicted_wait: Optional[float] = None
-    transitions: List[TransitionIn] = []
+    transitions: List[TransitionIn] = Field(
+        default_factory=list, max_length=config.MAX_TRANSITIONS_PER_ARRIVAL
+    )
     action: Literal["CROSS", "TIMEOUT"] = "CROSS"
     record_id: Optional[str] = None
 

@@ -1,13 +1,13 @@
 # 离线实验与历史归档
 
-当前在线演示使用 `../server/run_demo.sh`。本目录用于离线实验和历史复现。
+当前在线演示使用根目录的 `../run.sh`。本目录用于离线实验和历史复现。
 
 ```bash
 # 在仓库根目录执行；默认固定 seed=2024，可通过 SEED 覆盖
-./run.sh v1
-SEED=2025 ./run.sh v1 --robots 3
-./run.sh v2 --scout
-./run.sh v2 test
+./experiments/run.sh v1
+SEED=2025 ./experiments/run.sh v1 --robots 3
+./experiments/run.sh v2 --scout
+./experiments/run.sh v2 test
 ```
 
 新结果位于 `runs/<v1|v2>/<时间戳>-<进程号>/`，包含仿真输入、随机种子日志和评估图表。
@@ -18,7 +18,7 @@ SHA-256；归档完成后已逐文件校验。它不包含数据库、密钥、�
 名称中的日期指历史实验日期，不是当前服务的版本日期。
 
 历史 v2 有不同的 Scout 学习判据，因此保留可复现快照，不将其混入当前算法包。
-`run.sh v2` 只解压所需源码到临时目录，退出后清理，不解压历史数据；输出仍写入本目录的 `runs/`。
+`experiments/run.sh v2` 只解压所需源码到临时目录，退出后清理，不解压历史数据；输出仍写入本目录的 `runs/`。
 
 ```bash
 # 从仓库根目录查看历史文件，或解压到自己选择的空目录

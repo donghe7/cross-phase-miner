@@ -83,13 +83,15 @@ def main():
                     "state.snapshot?.robots.length===20 && document.querySelector('#robot-picker').children.length===20"
                 )
                 assert page.locator("#fleet tr:visible").count() == 5
-                assert "1 / 4 页" in page.locator("#fleet-page").inner_text()
+                assert "페이지 1 / 4" in page.locator("#fleet-page").inner_text()
                 page.locator("#fleet-next").click()
                 assert "6–10 / 20" in page.locator("#fleet-page").inner_text()
-                page.get_by_role("button", name="定位 robot_020", exact=True).click()
-                assert "第 4 / 4 页" in page.locator("#fleet-page").inner_text()
+                page.get_by_role("button", name="robot_020 위치 보기", exact=True).click()
+                assert "페이지 4 / 4" in page.locator("#fleet-page").inner_text()
                 assert page.locator("#fleet-next").is_disabled()
-                assert page.get_by_role("button", name="跟随 robot_020", exact=True).is_visible()
+                assert page.get_by_role(
+                    "button", name="robot_020 따라가기", exact=True
+                ).is_visible()
                 page.wait_for_function(
                     "document.querySelector('#track-content')?.textContent.includes('R020')"
                 )
@@ -120,9 +122,9 @@ def main():
                     path=str(ROOT / "test-results/fleet-mobile.png")
                 )
                 page.locator("#fleet-prev").click()
-                assert "第 3 / 4 页" in page.locator("#fleet-page").inner_text()
-                page.get_by_role("button", name="定位 robot_001", exact=True).click()
-                assert "第 1 / 4 页" in page.locator("#fleet-page").inner_text()
+                assert "페이지 3 / 4" in page.locator("#fleet-page").inner_text()
+                page.get_by_role("button", name="robot_001 위치 보기", exact=True).click()
+                assert "페이지 1 / 4" in page.locator("#fleet-page").inner_text()
                 assert page.locator("#speed-options button").count() == 5
                 assert not errors, errors
                 print(
