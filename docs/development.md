@@ -1,8 +1,8 @@
 # 开发与验证
 
-在 `project/` 执行。Python 依赖统一维护于 `pyproject.toml`：核心只需 NumPy，
+在仓库根目录执行。Python 依赖统一维护于 `pyproject.toml`：核心只需 NumPy，
 `server` 包含 API、PostgreSQL 与 MQTT，`experiment` 包含绘图，`dev` 包含 Ruff 与 build，
-`browser` 包含 Playwright。兼容的 requirements 文件不重复定义版本。
+`browser` 包含 Playwright。
 
 ```bash
 python3 -m pip install -e '.[server,experiment,dev,browser]'

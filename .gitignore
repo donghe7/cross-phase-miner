@@ -16,10 +16,10 @@ htmlcov/
 *.sqlite3-wal
 *.sqlite3-shm
 *.dump
-/project/server/backups/
-/project/experiments/runs/
-/project/experiment_results/
-/project/simulation/
-/project/evaluation/
-/project/test-results/
+/server/backups/
+/experiments/runs/
+/experiment_results/
+/simulation/
+/evaluation/
+/test-results/
 node_modules/

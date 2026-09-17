@@ -1,5 +1,5 @@
-include Makefile run.sh requirements.txt package.json package-lock.json .prettierrc.json
-recursive-include server *.sh *.yaml *.conf requirements.txt README_cn.md
+include Makefile run.sh package.json package-lock.json .prettierrc.json
+recursive-include server *.sh *.yaml *.conf
 recursive-include server/static *.html *.css *.js
 recursive-include docs *.md
 recursive-include tests *.py

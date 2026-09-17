@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CrossPhase · 机器人与信号灯</title>
+    <link rel="stylesheet" href="/static/console.css" />
+    <script src="/static/console.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="brand-icon">↗</span>
+        <div>
+          <h1>CrossPhase <span>车队观测台</span></h1>
+          <p>机器人位置 · 信号观测 · 周期学习</p>
+        </div>
+      </div>
+      <div class="clock">
+        <strong id="clock">--:--:--</strong><span id="clock-meta">仿真时间 / KST</span>
+      </div>
+      <div class="speed-control">
+        <span id="speed-label">仿真速度</span>
+        <div id="speed-options" class="speed-options" role="group" aria-labelledby="speed-label">
+          <button type="button" data-speed="1" aria-pressed="false" disabled>1×</button>
+          <button type="button" data-speed="2" aria-pressed="false" disabled>2×</button>
+          <button type="button" data-speed="5" aria-pressed="false" disabled>5×</button>
+          <button type="button" data-speed="10" aria-pressed="false" disabled>10×</button>
+          <button type="button" data-speed="20" aria-pressed="false" disabled>20×</button>
+        </div>
+        <span id="speed-status" role="status" aria-live="polite">作用于整个仿真</span>
+      </div>
+      <span class="connection" id="connection" role="status">正在连接</span>
+    </header>
+    <div class="error" id="error" role="alert" hidden></div>
+    <main>
+      <section class="overview" aria-label="车队概览">
+        <div>
+          <span>已上报机器人</span><strong id="robot-count">—</strong
+          ><small id="robot-summary">等待车队上报</small>
+        </div>
+        <div>
+          <span>当前有观测的路口</span><strong id="observed-count">—</strong
+          ><small id="coverage-summary">等待观测</small>
+        </div>
+        <div class="gate">
+          <span>单帧置信度门槛</span><strong id="obs-threshold">—</strong
+          ><small>confidence ≥ threshold，才接收该帧</small>
+        </div>
+        <div class="gate">
+          <span>车队共识门槛</span><strong id="consensus-threshold">—</strong
+          ><small>按置信度加权的一致率，决定实时灯色</small>
+        </div>
+      </section>
+      <div class="workspace">
+        <div class="primary">
+          <section class="panel fleet-panel">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow">01 / FLEET</span>
+                <h2>机器人现在在哪儿</h2>
+              </div>
+              <span class="hint">点击机器人，持续跟随它的位置</span>
+            </div>
+            <div id="tracking" class="tracking">
+              <span class="empty">暂无机器人上报。启动 fleet 后，会显示当前位置和行驶目的地。</span>
+            </div>
+            <div class="fleet-navigation">
+              <strong id="fleet-count">机器人列表</strong
+              ><span class="hint">点击编号直接查看并跟随</span>
+            </div>
+            <div id="robot-picker" class="robot-picker" aria-label="选择机器人"></div>
+            <div
+              class="table-scroll"
+              tabindex="0"
+              role="region"
+              aria-label="机器人详情表，窄屏可左右滚动"
+            >
+              <table class="fleet-table">
+                <colgroup>
+                  <col class="col-robot" />
+                  <col />
+                  <col class="col-status" />
+                  <col class="col-observation" />
+                  <col class="col-confidence" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>机器人</th>
+                    <th>当前位置 / 行程</th>
+                    <th>状态</th>
+                    <th>最近一帧观测</th>
+                    <th>置信度 / 门槛</th>
+                  </tr>
+                </thead>
+                <tbody id="fleet"></tbody>
+              </table>
+              <p id="fleet-empty" class="empty">等待机器人上报</p>
+            </div>
+            <nav class="fleet-pagination" aria-label="机器人列表翻页">
+              <span id="fleet-page" class="hint">每页 5 台</span
+              ><button id="fleet-prev" type="button" disabled>上一页</button
+              ><button id="fleet-next" type="button" disabled>下一页</button>
+            </nav>
+            <p class="fleet-mobile-note hint">
+              窄屏可左右滑动表格查看全部列；更多机器人请使用翻页按钮。
+            </p>
+          </section>
+          <section class="panel">
+            <div class="section-heading map-heading">
+              <div>
+                <span class="eyebrow">02 / CROSSINGS</span>
+                <h2>路口与模型进度</h2>
+              </div>
+              <label class="search"
+                >查看范围<select id="map-scope">
+                  <option value="zone">配送区路口</option>
+                  <option value="all">全部路口</option>
+                </select></label
+              ><label class="search"
+                >查找路口<input
+                  id="search"
+                  type="search"
+                  placeholder="名称、区域或 ID"
+                  autocomplete="off"
+              /></label>
+            </div>
+            <p class="hint map-note">
+              路口示意图，非 GPS
+              地图。蓝色标记表示机器人最后上报所在路口；「前往」表示目的地，不代表已到达。
+            </p>
+            <div class="legend">
+              <span><i class="dot red"></i>实时红灯</span
+              ><span><i class="dot green"></i>实时绿灯</span
+              ><span><i class="dot predicted"></i>模型预测</span
+              ><span><i class="dot amber"></i>共识不足</span
+              ><span><i class="dot unknown"></i>暂无有效数据</span>
+            </div>
+            <div id="zone-map" class="zone-map" aria-label="配送区路口及机器人位置"></div>
+            <p id="no-results" class="empty" hidden>没有匹配的路口。</p>
+            <div class="map-pagination">
+              <span id="map-page" class="hint"></span
+              ><button id="map-prev" type="button">上一页</button
+              ><button id="map-next" type="button">下一页</button>
+            </div>
+            <p class="hint">
+              模型置信度与单帧视觉置信度不同。到访统计来自已结束的到访汇总；每次重复到访单独计数，机器人数量去重。首次时间为仿真时间，详情保留实际记录时间。
+            </p>
+            <details class="all-crossings">
+              <summary id="all-summary">全部路口概览</summary>
+              <p class="hint">点击任一色块查看观测和学习结果。搜索同时筛选此概览。</p>
+              <div id="field" class="field" aria-label="全部路口"></div>
+            </details>
+          </section>
+          <section class="panel metrics">
+            <div>
+              <span class="eyebrow">INGEST / LEARNING</span>
+              <h2>观测与学习</h2>
+            </div>
+            <dl id="ledger"></dl>
+          </section>
+        </div>
+        <aside class="panel detail-panel">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">03 / INSPECT</span>
+              <h2>路口观测详情</h2>
+            </div>
+            <span id="detail-status" class="hint"></span>
+          </div>
+          <div id="detail">
+            <p class="empty">点击路口卡片，查看灯色、观测置信度、共识结果和周期。</p>
+          </div>
+        </aside>
+      </div>
+    </main>
+    <footer>
+      CrossPhase / 仿真观测控制台 <span>位置来自机器人上报 · threshold 来自服务器实际配置</span>
+    </footer>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 # 运行、数据库与消息协议
 
-从 `project/` 目录执行。
+从仓库根目录执行。
 
 ## 1. 一分钟跑起来
 
@@ -21,7 +21,7 @@
 ### 本机 MQTT
 
 ```bash
-pip install -r server/requirements.txt
+python3 -m pip install -e '.[server]'
 ./server/run_demo.sh --postgres --mqtt
 ```
 
@@ -57,7 +57,7 @@ Ctrl-C 停止后端和车队，broker 保留运行；可用
 
 ### 本机 PostgreSQL
 
-从 `project/` 目录执行上述命令。需要 Docker Engine、Docker Compose 及 Python 依赖。
+需要 Docker Engine、Docker Compose 及 Python 依赖，命令均从仓库根目录执行。
 Compose 使用官方 `postgres:18` 镜像，数据库只绑定 `127.0.0.1:5432`。
 首次运行自动生成 `server/.env.postgres`，内含随机密码，文件权限为 `0600` 并由 git 忽略。
 账号和数据库名默认为 `crossphase`。后端仍在本机 conda 环境中运行，不需要容器化。
